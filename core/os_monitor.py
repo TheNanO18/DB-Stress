@@ -46,6 +46,7 @@ class OsMonitor:
         self._ssh_client = None
         self._available = False
         self._mode = "none"
+        self._db_name = cfg.db_name  # 특정 DB 인스턴스 필터링용
 
         # Docker 모드가 최우선
         self._docker_enabled = cfg.docker_enabled
@@ -158,14 +159,30 @@ class OsMonitor:
     # CPU
     # ------------------------------------------------------------------
     def get_cpu_percent(self) -> float:
-        """CPU 사용률(%)을 반환합니다."""
+        """CUBRID 프로세스의 CPU 사용률(%)을 반환합니다."""
         if not self._available:
             return 0.0
         if self._docker_enabled:
             return self._docker_cpu_percent()
         if self._is_local:
-            return psutil.cpu_percent(interval=0.1)
+            return self._local_cubrid_cpu()
         return self._ssh_cpu_percent()
+
+    def _local_cubrid_cpu(self) -> float:
+        """psutil로 로컬 CUBRID 프로세스의 CPU 사용률을 측정합니다."""
+        try:
+            db = self._db_name.lower()
+            total = 0.0
+            for proc in psutil.process_iter(['name', 'cmdline', 'cpu_percent']):
+                name = (proc.info['name'] or '').lower()
+                if not name.startswith('cub_'):
+                    continue
+                cmdline = ' '.join(proc.info['cmdline'] or []).lower()
+                if db in cmdline:
+                    total += proc.info['cpu_percent'] or 0.0
+            return round(total, 1)
+        except Exception:
+            return 0.0
 
     def _docker_cpu_percent(self) -> float:
         """Docker 컨테이너의 CPU 사용률을 조회합니다."""
@@ -189,18 +206,16 @@ class OsMonitor:
             return 0.0
 
     def _ssh_cpu_percent(self) -> float:
-        """SSH로 원격 서버 CPU 사용률을 조회합니다."""
+        """SSH로 원격 서버의 특정 CUBRID DB 프로세스 CPU 사용률을 조회합니다."""
         try:
-            output = self._exec_ssh("top -bn1 | grep '%Cpu' | head -1")
-            match = re.search(r'(\d+\.?\d*)\s*id', output)
-            if match:
-                idle = float(match.group(1))
-                return round(100.0 - idle, 1)
-            output = self._exec_ssh("mpstat 1 1 2>/dev/null | tail -1")
-            match = re.search(r'(\d+\.?\d*)\s*$', output.strip())
-            if match:
-                idle = float(match.group(1))
-                return round(100.0 - idle, 1)
+            # args에 DB 이름이 포함된 CUBRID 프로세스만 필터 (cub_server hadb, cub_cas hadb 등)
+            db = self._db_name
+            output = self._exec_ssh(
+                f"ps -eo %cpu,args --no-headers | grep 'cub_' | grep '{db}' | awk '{{sum+=$1}} END {{printf \"%.1f\", sum}}'"
+            )
+            val = output.strip()
+            if val:
+                return float(val)
             return 0.0
         except Exception:
             return 0.0
@@ -209,14 +224,30 @@ class OsMonitor:
     # Memory
     # ------------------------------------------------------------------
     def get_memory_percent(self) -> float:
-        """메모리 사용률(%)을 반환합니다."""
+        """CUBRID 프로세스의 메모리 사용률(%)을 반환합니다."""
         if not self._available:
             return 0.0
         if self._docker_enabled:
             return self._docker_memory_percent()
         if self._is_local:
-            return psutil.virtual_memory().percent
+            return self._local_cubrid_memory()
         return self._ssh_memory_percent()
+
+    def _local_cubrid_memory(self) -> float:
+        """psutil로 로컬 CUBRID 프로세스의 메모리 사용률을 측정합니다."""
+        try:
+            db = self._db_name.lower()
+            total = 0.0
+            for proc in psutil.process_iter(['name', 'cmdline', 'memory_percent']):
+                name = (proc.info['name'] or '').lower()
+                if not name.startswith('cub_'):
+                    continue
+                cmdline = ' '.join(proc.info['cmdline'] or []).lower()
+                if db in cmdline:
+                    total += proc.info['memory_percent'] or 0.0
+            return round(total, 1)
+        except Exception:
+            return 0.0
 
     def _docker_memory_percent(self) -> float:
         """Docker 컨테이너의 메모리 사용률을 조회합니다."""
@@ -239,15 +270,15 @@ class OsMonitor:
             return 0.0
 
     def _ssh_memory_percent(self) -> float:
-        """SSH로 원격 서버 메모리 사용률을 조회합니다."""
+        """SSH로 원격 서버의 특정 CUBRID DB 프로세스 메모리 사용률(%)을 조회합니다."""
         try:
-            output = self._exec_ssh("free -m | grep Mem")
-            parts = output.split()
-            if len(parts) >= 3:
-                total = float(parts[1])
-                used = float(parts[2])
-                if total > 0:
-                    return round(used / total * 100, 1)
+            db = self._db_name
+            output = self._exec_ssh(
+                f"ps -eo %mem,args --no-headers | grep 'cub_' | grep '{db}' | awk '{{sum+=$1}} END {{printf \"%.1f\", sum}}'"
+            )
+            val = output.strip()
+            if val:
+                return float(val)
             return 0.0
         except Exception:
             return 0.0
