@@ -1,0 +1,59 @@
+###############################################################################
+# CUBRID DB Stress Test Configuration
+###############################################################################
+
+database:
+  host: "localhost"
+  port: 33000
+  name: "hadb"
+  user: "test_user"
+  password: "test"
+
+# 테스트용 테이블 설정
+table:
+  name: "concert"
+  # 테스트 시작 시 테이블을 초기화할지 여부
+  recreate_on_start: true
+  # 테스트 시작 시 자동 삽입할 시드 데이터 건수
+  # SELECT/UPDATE/DELETE 시나리오가 빈 테이블에서 허공을 치지 않도록 보장
+  # 0이면 시드 삽입 없이 시작
+  seed_rows: 5000
+
+# 더미 데이터 풀 설정 (Pre-generation)
+data_pool:
+  # 미리 생성할 더미 레코드 수
+  size: 10000
+  # Faker 로케일
+  locale: "ko_KR"
+
+# Locust 부하 테스트 설정
+load_test:
+  # 동시 사용자 수 (spawn rate와 함께 조절)
+  users: 100
+  spawn_rate: 10
+  # 테스트 지속 시간 (초). 0이면 수동 중지까지 계속
+  run_time: 0
+  # 각 태스크 실행 사이 대기 시간 (초)
+  wait_min: 0.1
+  wait_max: 1.0
+
+# ---------------------------------------------------------------------------
+# 시나리오 프로필 (--class-picker 모드에서 웹 UI 체크박스로 선택)
+# ---------------------------------------------------------------------------
+# 실행 명령: locust -f scenarios/locustfile.py --class-picker
+#
+# 사용 가능한 시나리오:
+#
+# [부하 유형별]
+#   BulkInsertUser      — 대량 INSERT (디스크 I/O, 인덱스 부하)
+#   ReadIntensiveUser   — PK 기반 SELECT (최대 TPS 측정)
+#   LockContentionUser  — 동일 행 동시 UPDATE (Lock 경합)
+#   HeavyQueryUser      — 풀스캔/셀프조인/정렬 (CPU·메모리 고갈)
+#   ConnectionChurnUser — 연결 생성/해제 반복 (Broker·Network 부하)
+#
+# [CRUD 종합/개별]
+#   CrudMixUser         — INSERT/SELECT/UPDATE/DELETE 균등 실행
+#   CreateOnlyUser      — INSERT 단독 테스트
+#   ReadOnlyUser        — SELECT 단독 테스트
+#   UpdateOnlyUser      — UPDATE 단독 테스트
+#   DeleteOnlyUser      — DELETE 단독 테스트

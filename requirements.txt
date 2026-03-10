@@ -1,0 +1,5 @@
+locust==2.32.2      # 부하 테스트 코어 엔진 및 웹 대시보드
+Faker==33.1.0       # 한국어 더미 데이터 생성기
+PyYAML==6.0.2       # config.yaml 설정 파일 파싱용
+JayDeBeApi==1.2.3   # JDBC를 통한 CUBRID 접속 (pyodbc 대체)
+JPype1==1.6.0       # JayDeBeApi의 JVM 브릿지 의존성
