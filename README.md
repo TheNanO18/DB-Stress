@@ -128,7 +128,12 @@ cubrid_stress_tool/
 │   └── monitor.html         # Chart.js 실시간 모니터링 대시보드
 └── scenarios/
     ├── __init__.py
-    └── locustfile.py        # 11개 시나리오별 User 클래스 정의
+    ├── locustfile.py        # Locust 진입점 (import만 모아둠)
+    ├── _shared.py           # 공통 유틸 (MaxIdTracker, CubridMixin, SQL 상수)
+    ├── _init_hooks.py       # CLI 파라미터 등록 + 테스트 시작 초기화
+    ├── _web_routes.py       # 모니터링 대시보드 웹 라우트
+    ├── stress_users.py      # 부하 시나리오 User 클래스 10개
+    └── monitor_user.py      # DB 모니터링 전용 User 클래스
 ```
 
 ---
@@ -419,7 +424,7 @@ ssh:
 
 ### 1. 테이블 스키마 변경
 
-`scenarios/locustfile.py`의 `_CREATE_TABLE_SQL`을 수정합니다.
+`scenarios/_shared.py`의 `CREATE_TABLE_SQL`을 수정합니다.
 
 **현재 스키마:**
 
@@ -497,15 +502,16 @@ def pick_values(self) -> tuple:
 
 ### 3. 테스트 시나리오 추가
 
-새 시나리오를 추가하려면 `scenarios/locustfile.py`에 새 User 클래스를 추가합니다.
+새 시나리오를 추가하려면 `scenarios/stress_users.py`에 새 User 클래스를 추가하고, `scenarios/locustfile.py`에서 import합니다.
 
 **예시 — 나이 범위 검색 시나리오:**
 
 ```python
-class AgeRangeSearchUser(_CubridMixin, User):
+# scenarios/stress_users.py에 추가
+class AgeRangeSearchUser(CubridMixin, User):
     """나이 범위 검색 시나리오."""
 
-    wait_time = between(_cfg.wait_min, _cfg.wait_max)
+    wait_time = default_wait_time
 
     def on_start(self):
         self._setup()
@@ -522,7 +528,12 @@ class AgeRangeSearchUser(_CubridMixin, User):
         self.client.execute("SELECT", "select_by_age", sql, (min_age, max_age), fetch=True)
 ```
 
-> 새 User 클래스를 추가하면 `--class-picker` UI에 자동으로 체크박스가 추가됩니다.
+```python
+# scenarios/locustfile.py에 import 추가
+from scenarios.stress_users import AgeRangeSearchUser  # noqa: F401
+```
+
+> 새 User 클래스를 `locustfile.py`에서 import하면 `--class-picker` UI에 자동으로 체크박스가 추가됩니다.
 
 ### 4. 새 설정 항목 추가
 
@@ -551,7 +562,12 @@ def log_level(self) -> str:
 | 파일 | 역할 | 수정 시점 |
 |------|------|-----------|
 | `config.yaml` | DB 접속, 부하, SSH, Docker 설정 | 설정값만 바꿀 때 |
-| `scenarios/locustfile.py` | 테이블 DDL, 11개 시나리오 User 클래스, 웹 라우트 | 스키마·쿼리·시나리오 변경 시 |
+| `scenarios/locustfile.py` | Locust 진입점 (import만 모아둠) | 새 시나리오 import 추가 시 |
+| `scenarios/_shared.py` | MaxIdTracker, CubridMixin, 테이블 DDL/DML 상수 | 스키마·INSERT 쿼리 변경 시 |
+| `scenarios/_init_hooks.py` | CLI 파라미터 등록, 테스트 시작 초기화 (오버라이드, 시드) | 초기화 로직 변경 시 |
+| `scenarios/_web_routes.py` | 모니터링 대시보드 웹 라우트 (/monitor) | 대시보드 API 변경 시 |
+| `scenarios/stress_users.py` | 부하 시나리오 User 클래스 10개 | 시나리오 추가·수정 시 |
+| `scenarios/monitor_user.py` | DBMonitorUser (OS/DB 메트릭 수집) | 모니터링 항목 변경 시 |
 | `data/generator.py` | 더미 데이터 구조 및 생성 로직 | 테이블 컬럼 변경 시 함께 수정 |
 | `core/config.py` | config.yaml 파싱, 설정 접근자 | 새 설정 항목 추가 시 |
 | `core/db_client.py` | CUBRID 연결, SQL 실행, Locust 리포팅 | SQL 실행 방식 변경 시 |
@@ -559,5 +575,5 @@ def log_level(self) -> str:
 | `core/metrics_store.py` | 스레드 안전 시계열 메트릭 저장소 | 새 메트릭 추가 시 |
 | `templates/monitor.html` | Chart.js 실시간 모니터링 대시보드 | 차트 UI 변경 시 |
 
-> **핵심 원칙**: 테이블 스키마를 변경하면 `locustfile.py`(DDL + 쿼리) → `generator.py`(더미 데이터) → `config.yaml` 세 파일을 함께 수정합니다.
-> 새 시나리오를 추가하려면 `locustfile.py`에 User 클래스를 추가하면 `--class-picker` UI에 자동 반영됩니다.
+> **핵심 원칙**: 테이블 스키마를 변경하면 `_shared.py`(DDL + INSERT 템플릿) → `generator.py`(더미 데이터) → `config.yaml` 세 파일을 함께 수정합니다.
+> 새 시나리오를 추가하려면 `stress_users.py`에 User 클래스를 추가하고 `locustfile.py`에서 import하면 `--class-picker` UI에 자동 반영됩니다.

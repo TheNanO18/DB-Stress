@@ -106,7 +106,24 @@ class Config:
 
     @property
     def docker_container_name(self) -> str:
+        """하위 호환: 단일 컨테이너 이름 (첫 번째 컨테이너)."""
+        containers = self.docker_containers
+        if containers:
+            return containers[0]["name"]
         return self._data.get("docker", {}).get("container_name", "")
+
+    @property
+    def docker_containers(self) -> list:
+        """Docker 컨테이너 목록. [{name: str, label: str}, ...]"""
+        docker_cfg = self._data.get("docker", {})
+        containers = docker_cfg.get("containers", [])
+        if containers:
+            return containers
+        # 하위 호환: container_name 단일 값
+        name = docker_cfg.get("container_name", "")
+        if name:
+            return [{"name": name, "label": name}]
+        return []
 
     # --- ssh 섹션 (원격 OS 모니터링) ---
     @property

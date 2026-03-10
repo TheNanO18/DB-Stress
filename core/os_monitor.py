@@ -34,9 +34,12 @@ class OsMonitor:
 
     사용법:
         monitor = OsMonitor()
+        # 단일 모드
         cpu = monitor.get_cpu_percent()
         mem = monitor.get_memory_percent()
-        disk = monitor.get_disk_io()
+        # 멀티 컨테이너 모드
+        stats = monitor.get_container_stats()
+        # → {"Master": {"cpu": 12.3, "mem": 5.1}, "Slave": {"cpu": 3.2, "mem": 4.0}, ...}
         monitor.close()
     """
 
@@ -48,22 +51,25 @@ class OsMonitor:
         self._mode = "none"
         self._db_name = cfg.db_name  # 특정 DB 인스턴스 필터링용
 
-        # Docker 모드가 최우선
+        # Docker 설정
         self._docker_enabled = cfg.docker_enabled
-        self._docker_container = cfg.docker_container_name
+        self._docker_containers = cfg.docker_containers  # [{name, label}, ...]
+        self._multi_container = len(self._docker_containers) > 1
 
         print(f"[OsMonitor] DB host='{cfg.db_host}', is_local={self._is_local}, "
-              f"docker={self._docker_enabled}, psutil={_HAS_PSUTIL}, paramiko={_HAS_PARAMIKO}")
+              f"docker={self._docker_enabled}, containers={len(self._docker_containers)}, "
+              f"psutil={_HAS_PSUTIL}, paramiko={_HAS_PARAMIKO}")
 
-        if self._docker_enabled and self._docker_container:
+        if self._docker_enabled and self._docker_containers:
+            labels = [c["label"] for c in self._docker_containers]
             if self._is_local:
                 self._init_docker_local()
             else:
                 if _HAS_PARAMIKO:
                     self._connect_ssh(cfg)
                     if self._ssh_client:
-                        self._mode = f"docker(SSH:{cfg.db_host}:{self._docker_container})"
-                        print(f"[OsMonitor] 원격 Docker 모드 — SSH로 컨테이너 '{self._docker_container}' 모니터링")
+                        self._mode = f"docker(SSH:{cfg.db_host}:{','.join(labels)})"
+                        print(f"[OsMonitor] 원격 Docker 모드 — SSH로 컨테이너 {labels} 모니터링")
                 else:
                     print(f"[OsMonitor] 원격 Docker 모드이나 paramiko 미설치 — OS 모니터링 비활성")
         elif self._is_local:
@@ -85,17 +91,19 @@ class OsMonitor:
     def _init_docker_local(self):
         """로컬 Docker 컨테이너 모니터링을 초기화합니다."""
         try:
+            # 첫 번째 컨테이너로 Docker 접근 가능 여부 확인
+            first = self._docker_containers[0]["name"]
             result = subprocess.run(
-                ["docker", "inspect", "--format", "{{.State.Running}}", self._docker_container],
-                capture_output=True, text=True, timeout=5,
+                f"docker ps --filter name={first} --format '{{{{.Names}}}}'",
+                shell=True, capture_output=True, text=True, timeout=5,
             )
-            if result.returncode == 0 and "true" in result.stdout.lower():
+            if result.returncode == 0 and result.stdout.strip():
                 self._available = True
-                self._mode = f"docker(local:{self._docker_container})"
-                print(f"[OsMonitor] 로컬 Docker 모드 — 컨테이너 '{self._docker_container}' 모니터링")
+                labels = [c["label"] for c in self._docker_containers]
+                self._mode = f"docker(local:{','.join(labels)})"
+                print(f"[OsMonitor] 로컬 Docker 모드 — 컨테이너 {labels} 모니터링")
             else:
-                print(f"[OsMonitor] 컨테이너 '{self._docker_container}'를 찾을 수 없거나 실행 중이 아닙니다")
-                # Docker 실패 시 psutil 폴백
+                print(f"[OsMonitor] 컨테이너 '{first}'를 찾을 수 없습니다")
                 if _HAS_PSUTIL:
                     self._available = True
                     self._docker_enabled = False
@@ -155,15 +163,91 @@ class OsMonitor:
     def mode(self) -> str:
         return self._mode
 
+    @property
+    def is_multi_container(self) -> bool:
+        """멀티 컨테이너 모드인지 여부."""
+        return self._docker_enabled and self._multi_container
+
+    @property
+    def container_labels(self) -> list:
+        """설정된 컨테이너 라벨 목록."""
+        return [c["label"] for c in self._docker_containers]
+
     # ------------------------------------------------------------------
-    # CPU
+    # 멀티 컨테이너 통합 조회 (Docker 전용)
+    # ------------------------------------------------------------------
+    def get_container_stats(self) -> dict:
+        """
+        모든 Docker 컨테이너의 CPU/메모리를 한 번에 조회합니다.
+
+        Returns:
+            {label: {"cpu": float, "mem": float}, ...}
+            예: {"Master": {"cpu": 12.3, "mem": 5.1}, "Slave": {"cpu": 3.2, "mem": 4.0}}
+        """
+        if not self._available or not self._docker_enabled:
+            return {}
+
+        try:
+            # docker stats --no-stream 으로 전체 컨테이너 CPU/MEM을 한 번에 조회
+            cmd = "docker stats --no-stream --format '{{.Name}}\\t{{.CPUPerc}}\\t{{.MemPerc}}'"
+            if self._is_local:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=10,
+                )
+                output = result.stdout.strip()
+            else:
+                output = self._exec_ssh(cmd).strip()
+
+            # 출력 파싱: 각 줄 → "container_name\tCPU%\tMEM%"
+            stats_map = {}
+            for line in output.split('\n'):
+                line = line.strip().strip("'\"")
+                if not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 3:
+                    container_name = parts[0]
+                    cpu_str = parts[1].strip().strip("'\"")
+                    mem_str = parts[2].strip().strip("'\"")
+
+                    cpu_match = re.search(r'([\d.]+)%', cpu_str)
+                    mem_match = re.search(r'([\d.]+)%', mem_str)
+
+                    cpu_val = float(cpu_match.group(1)) if cpu_match else 0.0
+                    mem_val = float(mem_match.group(1)) if mem_match else 0.0
+
+                    stats_map[container_name] = {"cpu": cpu_val, "mem": mem_val}
+
+            # 설정된 컨테이너 이름(접두사)으로 매칭하여 라벨 부여
+            result_dict = {}
+            for container_cfg in self._docker_containers:
+                prefix = container_cfg["name"]
+                label = container_cfg["label"]
+                for full_name, vals in stats_map.items():
+                    if full_name.startswith(prefix):
+                        result_dict[label] = vals
+                        break
+                else:
+                    result_dict[label] = {"cpu": 0.0, "mem": 0.0}
+
+            return result_dict
+        except Exception as e:
+            print(f"[OsMonitor] Docker stats 조회 실패: {e}")
+            return {c["label"]: {"cpu": 0.0, "mem": 0.0} for c in self._docker_containers}
+
+    # ------------------------------------------------------------------
+    # CPU (단일 모드용)
     # ------------------------------------------------------------------
     def get_cpu_percent(self) -> float:
         """CUBRID 프로세스의 CPU 사용률(%)을 반환합니다."""
         if not self._available:
             return 0.0
         if self._docker_enabled:
-            return self._docker_cpu_percent()
+            # 단일 컨테이너 모드일 때만 사용
+            stats = self.get_container_stats()
+            if stats:
+                return list(stats.values())[0].get("cpu", 0.0)
+            return 0.0
         if self._is_local:
             return self._local_cubrid_cpu()
         return self._ssh_cpu_percent()
@@ -184,31 +268,9 @@ class OsMonitor:
         except Exception:
             return 0.0
 
-    def _docker_cpu_percent(self) -> float:
-        """Docker 컨테이너의 CPU 사용률을 조회합니다."""
-        try:
-            cmd = f"docker stats {self._docker_container} --no-stream --format '{{{{.CPUPerc}}}}'"
-            if self._is_local:
-                result = subprocess.run(
-                    cmd, shell=True, capture_output=True, text=True, timeout=5,
-                )
-                output = result.stdout.strip()
-            else:
-                output = self._exec_ssh(cmd).strip()
-
-            # "12.34%" → 12.34
-            output = output.strip("'\"")
-            match = re.search(r'([\d.]+)%', output)
-            if match:
-                return float(match.group(1))
-            return 0.0
-        except Exception:
-            return 0.0
-
     def _ssh_cpu_percent(self) -> float:
         """SSH로 원격 서버의 특정 CUBRID DB 프로세스 CPU 사용률을 조회합니다."""
         try:
-            # args에 DB 이름이 포함된 CUBRID 프로세스만 필터 (cub_server hadb, cub_cas hadb 등)
             db = self._db_name
             output = self._exec_ssh(
                 f"ps -eo %cpu,args --no-headers | grep 'cub_' | grep '{db}' | awk '{{sum+=$1}} END {{printf \"%.1f\", sum}}'"
@@ -221,14 +283,17 @@ class OsMonitor:
             return 0.0
 
     # ------------------------------------------------------------------
-    # Memory
+    # Memory (단일 모드용)
     # ------------------------------------------------------------------
     def get_memory_percent(self) -> float:
         """CUBRID 프로세스의 메모리 사용률(%)을 반환합니다."""
         if not self._available:
             return 0.0
         if self._docker_enabled:
-            return self._docker_memory_percent()
+            stats = self.get_container_stats()
+            if stats:
+                return list(stats.values())[0].get("mem", 0.0)
+            return 0.0
         if self._is_local:
             return self._local_cubrid_memory()
         return self._ssh_memory_percent()
@@ -246,26 +311,6 @@ class OsMonitor:
                 if db in cmdline:
                     total += proc.info['memory_percent'] or 0.0
             return round(total, 1)
-        except Exception:
-            return 0.0
-
-    def _docker_memory_percent(self) -> float:
-        """Docker 컨테이너의 메모리 사용률을 조회합니다."""
-        try:
-            cmd = f"docker stats {self._docker_container} --no-stream --format '{{{{.MemPerc}}}}'"
-            if self._is_local:
-                result = subprocess.run(
-                    cmd, shell=True, capture_output=True, text=True, timeout=5,
-                )
-                output = result.stdout.strip()
-            else:
-                output = self._exec_ssh(cmd).strip()
-
-            output = output.strip("'\"")
-            match = re.search(r'([\d.]+)%', output)
-            if match:
-                return float(match.group(1))
-            return 0.0
         except Exception:
             return 0.0
 
@@ -330,7 +375,7 @@ class OsMonitor:
         """SSH로 명령어를 실행하고 stdout을 반환합니다."""
         if not self._ssh_client:
             return ""
-        _, stdout, _ = self._ssh_client.exec_command(command, timeout=5)
+        _, stdout, _ = self._ssh_client.exec_command(command, timeout=10)
         return stdout.read().decode("utf-8", errors="replace")
 
     # ------------------------------------------------------------------

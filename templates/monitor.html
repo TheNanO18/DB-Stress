@@ -32,7 +32,7 @@
             display: flex; justify-content: space-between; align-items: center;
         }
         .card h3 .value {
-            font-size: 18px; color: #fff; font-weight: bold;
+            font-size: 14px; color: #fff; font-weight: bold;
         }
         canvas { width: 100% !important; height: 180px !important; }
         .back-link {
@@ -78,7 +78,7 @@
         </div>
     </div>
 
-    <a class="back-link" href="/">← Back to Locust Dashboard</a>
+    <a class="back-link" href="/">&#8592; Back to Locust Dashboard</a>
 
 <script>
 const CHART_OPTS = {
@@ -93,12 +93,16 @@ const CHART_OPTS = {
     elements: { point: { radius: 0 }, line: { borderWidth: 1.5 } }
 };
 
-function makeChart(id, datasets) {
+function makeChart(id, datasets, showLegend) {
     const ctx = document.getElementById(id).getContext('2d');
+    const opts = JSON.parse(JSON.stringify(CHART_OPTS));
+    if (showLegend) {
+        opts.plugins.legend = { display: true, labels: { color: '#aaa', font: { size: 10 } } };
+    }
     return new Chart(ctx, {
         type: 'line',
         data: { labels: [], datasets },
-        options: JSON.parse(JSON.stringify(CHART_OPTS))
+        options: opts
     });
 }
 
@@ -106,14 +110,19 @@ function ds(label, color) {
     return { label, data: [], borderColor: color, backgroundColor: color + '20', fill: true, tension: 0.3 };
 }
 
-const cpuChart = makeChart('cpuChart', [ds('CPU %', '#ff6384')]);
-const memChart = makeChart('memChart', [ds('Memory %', '#36a2eb')]);
-const diskChart = makeChart('diskChart', [ds('Read', '#4bc0c0'), ds('Write', '#ff9f40')]);
-diskChart.options.plugins.legend = { display: true, labels: { color: '#aaa', font: { size: 10 } } };
-const rtChart = makeChart('rtChart', [ds('Response (ms)', '#9966ff')]);
-const rowChart = makeChart('rowChart', [ds('Rows', '#ffcd56')]);
-const txChart = makeChart('txChart', [ds('Active TX', '#4bc0c0'), ds('Lock Waiters', '#ff6384')]);
-txChart.options.plugins.legend = { display: true, labels: { color: '#aaa', font: { size: 10 } } };
+// 컨테이너별 색상 팔레트
+const COLORS = ['#ff6384', '#36a2eb', '#ff9f40', '#4bc0c0', '#9966ff', '#ffcd56'];
+
+// 초기 차트 (단일 모드 — 멀티 컨테이너 감지 시 동적 교체)
+let cpuChart = makeChart('cpuChart', [ds('CPU %', '#ff6384')], false);
+let memChart = makeChart('memChart', [ds('Memory %', '#36a2eb')], false);
+const diskChart = makeChart('diskChart', [ds('Read', '#4bc0c0'), ds('Write', '#ff9f40')], true);
+const rtChart = makeChart('rtChart', [ds('Response (ms)', '#9966ff')], false);
+const rowChart = makeChart('rowChart', [ds('Rows', '#ffcd56')], false);
+const txChart = makeChart('txChart', [ds('Active TX', '#4bc0c0'), ds('Lock Waiters', '#ff6384')], true);
+
+let multiMode = false;
+let cLabels = [];
 
 function formatTime(ts) {
     const d = new Date(ts * 1000);
@@ -122,22 +131,66 @@ function formatTime(ts) {
 
 function last(arr) { return arr.length ? arr[arr.length - 1] : 0; }
 
+function initMultiCharts(labels) {
+    if (multiMode) return;
+    multiMode = true;
+    cLabels = labels;
+
+    // CPU 차트를 멀티라인으로 재생성
+    cpuChart.destroy();
+    cpuChart = makeChart('cpuChart',
+        labels.map((l, i) => ds(l, COLORS[i % COLORS.length])), true);
+
+    // Memory 차트를 멀티라인으로 재생성
+    memChart.destroy();
+    memChart = makeChart('memChart',
+        labels.map((l, i) => ds(l, COLORS[i % COLORS.length])), true);
+}
+
 async function fetchData() {
     try {
         const resp = await fetch('/monitor/data');
         const d = await resp.json();
         const labels = d.timestamps.map(formatTime);
 
+        // 멀티 컨테이너 모드 감지
+        if (d.container_labels && d.container_labels.length > 1 && !multiMode) {
+            initMultiCharts(d.container_labels);
+        }
+
+        // --- CPU ---
         cpuChart.data.labels = labels;
-        cpuChart.data.datasets[0].data = d.cpu_percent;
+        if (multiMode) {
+            const parts = [];
+            cLabels.forEach((label, i) => {
+                const key = 'cpu_' + label;
+                cpuChart.data.datasets[i].data = d[key] || [];
+                parts.push(label + ':' + last(d[key] || []).toFixed(1) + '%');
+            });
+            document.getElementById('cpuVal').textContent = parts.join(' | ');
+        } else {
+            cpuChart.data.datasets[0].data = d.cpu_percent;
+            document.getElementById('cpuVal').textContent = last(d.cpu_percent).toFixed(1) + '%';
+        }
         cpuChart.update();
-        document.getElementById('cpuVal').textContent = last(d.cpu_percent).toFixed(1) + '%';
 
+        // --- Memory ---
         memChart.data.labels = labels;
-        memChart.data.datasets[0].data = d.memory_percent;
+        if (multiMode) {
+            const parts = [];
+            cLabels.forEach((label, i) => {
+                const key = 'mem_' + label;
+                memChart.data.datasets[i].data = d[key] || [];
+                parts.push(label + ':' + last(d[key] || []).toFixed(1) + '%');
+            });
+            document.getElementById('memVal').textContent = parts.join(' | ');
+        } else {
+            memChart.data.datasets[0].data = d.memory_percent;
+            document.getElementById('memVal').textContent = last(d.memory_percent).toFixed(1) + '%';
+        }
         memChart.update();
-        document.getElementById('memVal').textContent = last(d.memory_percent).toFixed(1) + '%';
 
+        // --- Disk I/O ---
         diskChart.data.labels = labels;
         diskChart.data.datasets[0].data = d.disk_read_kb_s;
         diskChart.data.datasets[1].data = d.disk_write_kb_s;
@@ -145,16 +198,19 @@ async function fetchData() {
         document.getElementById('diskVal').textContent =
             'R:' + last(d.disk_read_kb_s) + ' W:' + last(d.disk_write_kb_s);
 
+        // --- Response Time ---
         rtChart.data.labels = labels;
         rtChart.data.datasets[0].data = d.response_time_ms;
         rtChart.update();
         document.getElementById('rtVal').textContent = last(d.response_time_ms).toFixed(1) + 'ms';
 
+        // --- Row Count ---
         rowChart.data.labels = labels;
         rowChart.data.datasets[0].data = d.row_count;
         rowChart.update();
         document.getElementById('rowVal').textContent = last(d.row_count).toLocaleString();
 
+        // --- Transactions / Locks ---
         txChart.data.labels = labels;
         txChart.data.datasets[0].data = d.active_transactions;
         txChart.data.datasets[1].data = d.lock_waiters;
