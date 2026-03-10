@@ -9,6 +9,8 @@ CUBRID 부하 테스트 시나리오 — 시나리오별 독립 User 클래스
 원하는 시나리오를 체크박스로 선택하여 실행할 수 있습니다.
 """
 
+import json
+import os
 import random
 import threading
 import time
@@ -17,12 +19,126 @@ from locust import User, task, between, events
 
 from core.config import get_config
 from core.db_client import CubridClient
+from core.metrics_store import get_metrics_store
+from core.os_monitor import OsMonitor
 from data.generator import get_data_pool
 
 # ---------------------------------------------------------------------------
 # 전역 설정 로드
 # ---------------------------------------------------------------------------
 _cfg = get_config()
+
+
+# ---------------------------------------------------------------------------
+# 커스텀 파라미터 — 웹 UI의 "Advanced options"에 DB 접속 필드 추가
+# ---------------------------------------------------------------------------
+@events.init_command_line_parser.add_listener
+def on_init_parser(parser, **kwargs):
+    parser.add_argument(
+        "--db-host", type=str, default="",
+        env_var="CUBRID_HOST",
+        help="DB 호스트 (비워두면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--db-port", type=int, default=0,
+        env_var="CUBRID_PORT",
+        help="DB 포트 (0이면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--db-name", type=str, default="",
+        env_var="CUBRID_DB",
+        help="DB 이름 (비워두면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--db-user", type=str, default="",
+        env_var="CUBRID_USER",
+        help="DB 사용자 (비워두면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--db-password", type=str, default="",
+        env_var="CUBRID_PASSWORD",
+        help="DB 비밀번호 (비워두면 config.yaml 값 사용)",
+    )
+    # SSH 원격 모니터링 파라미터
+    parser.add_argument(
+        "--ssh-user", type=str, default="",
+        env_var="SSH_USER",
+        help="SSH 사용자 (비워두면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--ssh-password", type=str, default="",
+        env_var="SSH_PASSWORD",
+        help="SSH 비밀번호 (비워두면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--ssh-port", type=int, default=0,
+        env_var="SSH_PORT",
+        help="SSH 포트 (0이면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--ssh-key-file", type=str, default="",
+        env_var="SSH_KEY_FILE",
+        help="SSH 키 파일 경로 (비워두면 config.yaml 값 사용)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 모니터링 대시보드 웹 라우트 등록 (/monitor, /monitor/data)
+# ---------------------------------------------------------------------------
+_metrics = get_metrics_store()
+
+
+@events.init.add_listener
+def on_init(environment, **kwargs):
+    """Locust 웹 서버에 모니터링 대시보드 라우트를 추가합니다."""
+    if environment.web_ui is None:
+        return
+
+    from flask import Response
+
+    _template_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "templates"
+    )
+
+    @environment.web_ui.app.route("/monitor")
+    def monitor_page():
+        html_path = os.path.join(_template_dir, "monitor.html")
+        with open(html_path, "r", encoding="utf-8") as f:
+            return Response(f.read(), content_type="text/html; charset=utf-8")
+
+    @environment.web_ui.app.route("/monitor/data")
+    def monitor_data():
+        data = _metrics.snapshot()
+        data["mode"] = _metrics.mode
+        return Response(
+            json.dumps(data), content_type="application/json"
+        )
+
+    # Locust 메인 페이지에 Monitor 링크 배너를 주입하는 미들웨어
+    _original_app = environment.web_ui.app
+
+    @_original_app.after_request
+    def inject_monitor_link(response):
+        if response.content_type and "text/html" in response.content_type:
+            inject_html = (
+                '<div id="monitor-banner" style="'
+                'position:fixed;top:0;left:0;right:0;z-index:9999;'
+                'background:#16213e;border-bottom:2px solid #00d4aa;'
+                'padding:6px 16px;text-align:center;font-size:13px;'
+                'font-family:Segoe UI,sans-serif;">'
+                '<a href="/monitor" style="color:#00d4aa;text-decoration:none;font-weight:bold;">'
+                '&#128202; CUBRID Stress Monitor Dashboard &rarr;'
+                '</a></div>'
+                '<script>document.body.style.paddingTop="36px";</script>'
+            )
+            data = response.get_data(as_text=True)
+            if '/monitor' not in data and '<body' in data.lower():
+                data = data.replace('</body>', inject_html + '</body>')
+                response.set_data(data)
+        return response
+
+    print("[Init] 모니터링 대시보드: http://localhost:8089/monitor")
+
 
 # ---------------------------------------------------------------------------
 # 글로벌 Max ID 추적기 (스레드 안전)
@@ -73,6 +189,81 @@ _DROP_TABLE_SQL = f"DROP TABLE IF EXISTS {_cfg.table_name}"
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
     """Locust 테스트가 시작될 때 테이블 초기화, 시드 데이터 삽입, 데이터 풀 워밍업."""
+
+    # ---------------------------------------------------------------
+    # 웹 UI 파라미터로 DB 접속 정보 동적 오버라이드
+    # Advanced options 또는 Host 필드에 입력한 값이 config.yaml 값을 덮어씁니다.
+    # 비워두면 config.yaml 기본값을 그대로 사용합니다.
+    # ---------------------------------------------------------------
+    opts = environment.parsed_options
+    overrides = []
+
+    # Advanced options 필드 (--db-host, --db-port, --db-name, --db-user, --db-password)
+    if getattr(opts, "db_host", "") and opts.db_host:
+        _cfg._data["database"]["host"] = opts.db_host
+        overrides.append(f"host={opts.db_host}")
+    if getattr(opts, "db_port", 0) and opts.db_port:
+        _cfg._data["database"]["port"] = opts.db_port
+        overrides.append(f"port={opts.db_port}")
+    if getattr(opts, "db_name", "") and opts.db_name:
+        _cfg._data["database"]["name"] = opts.db_name
+        overrides.append(f"name={opts.db_name}")
+    if getattr(opts, "db_user", "") and opts.db_user:
+        _cfg._data["database"]["user"] = opts.db_user
+        overrides.append(f"user={opts.db_user}")
+    if getattr(opts, "db_password", "") and opts.db_password:
+        _cfg._data["database"]["password"] = opts.db_password
+        overrides.append("password=***")
+
+    # Host 필드 폴백 (Advanced options에 db-host를 안 넣었을 때)
+    host_input = (environment.host or "").strip()
+    if host_input and "host" not in [o.split("=")[0] for o in overrides]:
+        host_input = host_input.replace("http://", "").replace("https://", "").rstrip("/")
+        if ":" in host_input:
+            parts = host_input.rsplit(":", 1)
+            _cfg._data["database"]["host"] = parts[0]
+            overrides.append(f"host={parts[0]}")
+            try:
+                port_val = int(parts[1])
+                _cfg._data["database"]["port"] = port_val
+                overrides.append(f"port={port_val}")
+            except ValueError:
+                pass
+        else:
+            _cfg._data["database"]["host"] = host_input
+            overrides.append(f"host={host_input}")
+
+    # SSH 접속 정보 오버라이드
+    ssh_overrides = []
+    if getattr(opts, "ssh_user", "") and opts.ssh_user:
+        _cfg._data.setdefault("ssh", {})["user"] = opts.ssh_user
+        ssh_overrides.append(f"user={opts.ssh_user}")
+    if getattr(opts, "ssh_password", "") and opts.ssh_password:
+        _cfg._data.setdefault("ssh", {})["password"] = opts.ssh_password
+        ssh_overrides.append("password=***")
+    if getattr(opts, "ssh_port", 0) and opts.ssh_port:
+        _cfg._data.setdefault("ssh", {})["port"] = opts.ssh_port
+        ssh_overrides.append(f"port={opts.ssh_port}")
+    if getattr(opts, "ssh_key_file", "") and opts.ssh_key_file:
+        _cfg._data.setdefault("ssh", {})["key_file"] = opts.ssh_key_file
+        ssh_overrides.append(f"key_file={opts.ssh_key_file}")
+
+    if ssh_overrides:
+        print(f"[Init] SSH 접속 정보 오버라이드: {', '.join(ssh_overrides)}")
+
+    if overrides:
+        print(f"[Init] DB 접속 정보 오버라이드: {', '.join(overrides)}")
+
+    if not _cfg.is_local_db:
+        if _cfg.ssh_password or _cfg.ssh_key_file:
+            print(f"[Init] 원격 DB 감지 → SSH({_cfg.ssh_user}@{_cfg.db_host}:{_cfg.ssh_port})로 OS 모니터링")
+        else:
+            print(f"[Init] 원격 DB 감지 — SSH 인증 미설정 → OS 모니터링 비활성 (config.yaml 또는 Advanced options에서 SSH 정보를 입력하세요)")
+    else:
+        print(f"[Init] 로컬 DB 감지 → psutil로 OS 모니터링")
+
+    print(f"[Init] DB 접속: {_cfg.db_host}:{_cfg.db_port}/{_cfg.db_name} (user={_cfg.db_user})")
+
     # 데이터 풀 미리 생성 (시드 삽입에서도 사용)
     pool = get_data_pool()
     print(f"[Init] 데이터 풀 준비 완료 (size={pool.size})")
@@ -451,11 +642,18 @@ class DBMonitorUser(User):
     외부 애플리케이션이 JDBC로 부하를 줄 때, 이 시나리오만 선택하면
     Locust 대시보드에서 DB 상태 변화를 실시간으로 모니터링할 수 있습니다.
 
+    OS 모니터링 자동 감지:
+    - database.host가 localhost/127.0.0.1 → psutil(로컬) 사용
+    - database.host가 원격 IP/호스트명 → SSH(paramiko) 사용
+
     관찰 항목:
     - 응답 시간 프로브 (SELECT 1건으로 DB 응답성 측정)
     - 테이블 행 수 변화 (외부 INSERT/DELETE 감지)
     - 활성 트랜잭션 수 (동시 접속 세션 수)
     - Lock 대기 건수 (Lock 경합 감지)
+    - CPU 사용률 (로컬: psutil / 원격: SSH)
+    - 메모리 사용률 (로컬: psutil / 원격: SSH)
+    - 디스크 I/O (로컬: psutil / 원격: SSH)
     """
 
     # 모니터링은 1~2초 간격으로 (부하를 주지 않기 위해 느리게)
@@ -468,15 +666,22 @@ class DBMonitorUser(User):
         self.client = CubridClient()
         self.table = _cfg.table_name
         self._prev_row_count = None
+        self._os_monitor = OsMonitor()
+        _metrics.mode = self._os_monitor.mode
+        print(f"[Monitor] OS 모니터링 모드: {self._os_monitor.mode} (available={self._os_monitor.available})")
 
     def on_stop(self):
         self.client.close()
+        self._os_monitor.close()
 
     @task(3)
     def probe_response_time(self):
         """응답 시간 프로브 — 가장 가벼운 SELECT로 DB 응답성을 측정합니다."""
         sql = f"SELECT 1 FROM {self.table} WHERE ROWNUM <= 1"
+        start = time.perf_counter()
         self.client.execute("MONITOR", "[Monitor] response_probe", sql, fetch=True)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        _metrics.record("response_time_ms", round(elapsed_ms, 2))
 
     @task(2)
     def check_row_count(self):
@@ -490,7 +695,6 @@ class DBMonitorUser(User):
             count = row[0] if row else 0
             elapsed_ms = (time.perf_counter() - start) * 1000
 
-            # 행 수를 response_length로 기록 (차트에서 변화 추적 가능)
             events.request.fire(
                 request_type="MONITOR",
                 name="[Monitor] row_count",
@@ -498,8 +702,8 @@ class DBMonitorUser(User):
                 response_length=count,
                 exception=None,
             )
+            _metrics.record("row_count", count)
 
-            # 변화 감지 시 콘솔 출력
             if self._prev_row_count is not None and count != self._prev_row_count:
                 diff = count - self._prev_row_count
                 sign = "+" if diff > 0 else ""
@@ -536,6 +740,7 @@ class DBMonitorUser(User):
                 response_length=count,
                 exception=None,
             )
+            _metrics.record("active_transactions", count)
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start) * 1000
             events.request.fire(
@@ -567,6 +772,7 @@ class DBMonitorUser(User):
                 response_length=count,
                 exception=None,
             )
+            _metrics.record("lock_waiters", count)
 
             if count > 0:
                 print(f"[Monitor] Lock 대기 감지: {count}건")
@@ -581,3 +787,104 @@ class DBMonitorUser(User):
             )
         finally:
             cursor.close()
+
+    # ------------------------------------------------------------------
+    # OS 레벨 모니터링 (로컬: psutil / 원격: SSH / Docker 자동 감지)
+    # ------------------------------------------------------------------
+    @task(2)
+    def check_cpu_usage(self):
+        """CPU 사용률 — DB 서버의 CPU 사용률을 측정합니다."""
+        if not self._os_monitor.available:
+            return
+        start = time.perf_counter()
+        try:
+            cpu_percent = self._os_monitor.get_cpu_percent()
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] cpu_percent",
+                response_time=elapsed_ms,
+                response_length=int(cpu_percent),
+                exception=None,
+            )
+            _metrics.record("cpu_percent", round(cpu_percent, 1))
+
+            if cpu_percent > 90:
+                print(f"[Monitor] CPU 과부하: {cpu_percent:.1f}%")
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] cpu_percent",
+                response_time=elapsed_ms,
+                response_length=0,
+                exception=e,
+            )
+
+    @task(2)
+    def check_memory_usage(self):
+        """메모리 사용률 — DB 서버의 메모리 사용률을 측정합니다."""
+        if not self._os_monitor.available:
+            return
+        start = time.perf_counter()
+        try:
+            mem_percent = self._os_monitor.get_memory_percent()
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] memory_percent",
+                response_time=elapsed_ms,
+                response_length=int(mem_percent),
+                exception=None,
+            )
+            _metrics.record("memory_percent", round(mem_percent, 1))
+
+            if mem_percent > 90:
+                print(f"[Monitor] 메모리 과부하: {mem_percent:.1f}%")
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] memory_percent",
+                response_time=elapsed_ms,
+                response_length=0,
+                exception=e,
+            )
+
+    @task(1)
+    def check_disk_io(self):
+        """디스크 I/O — DB 서버의 디스크 읽기/쓰기를 측정합니다."""
+        if not self._os_monitor.available:
+            return
+        start = time.perf_counter()
+        try:
+            read_kb_s, write_kb_s = self._os_monitor.get_disk_io()
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] disk_write_kb_s",
+                response_time=elapsed_ms,
+                response_length=write_kb_s,
+                exception=None,
+            )
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] disk_read_kb_s",
+                response_time=elapsed_ms,
+                response_length=read_kb_s,
+                exception=None,
+            )
+            _metrics.record("disk_read_kb_s", read_kb_s)
+            _metrics.record("disk_write_kb_s", write_kb_s)
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] disk_write_kb_s",
+                response_time=elapsed_ms,
+                response_length=0,
+                exception=e,
+            )

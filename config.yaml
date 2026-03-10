@@ -6,8 +6,8 @@ database:
   host: "localhost"
   port: 33000
   name: "hadb"
-  user: "test_user"
-  password: "test"
+  user: ""
+  password: ""
 
 # 테스트용 테이블 설정
 table:
@@ -17,7 +17,7 @@ table:
   # 테스트 시작 시 자동 삽입할 시드 데이터 건수
   # SELECT/UPDATE/DELETE 시나리오가 빈 테이블에서 허공을 치지 않도록 보장
   # 0이면 시드 삽입 없이 시작
-  seed_rows: 5000
+  seed_rows: 3000
 
 # 더미 데이터 풀 설정 (Pre-generation)
 data_pool:
@@ -43,6 +43,22 @@ monitor:
   interval_min: 1.0
   interval_max: 2.0
 
+# Docker 컨테이너 모니터링 설정
+# DB가 Docker 컨테이너로 실행 중일 때 컨테이너 단위 CPU 사용률을 측정합니다.
+# enabled: true 이면 호스트 전체가 아닌 해당 컨테이너의 CPU%만 표시합니다.
+docker:
+  enabled: false
+  container_name: "cubrid-db"
+
+# SSH 원격 모니터링 설정 (DB 서버가 원격일 때 OS 메트릭 수집용)
+# database.host가 localhost/127.0.0.1이면 psutil(로컬)을 사용하고,
+# 그 외에는 SSH로 원격 서버에 접속하여 OS 메트릭을 수집합니다.
+ssh:
+  port: 22
+  user: "root"
+  password: ""
+  key_file: ""
+
 # ---------------------------------------------------------------------------
 # 시나리오 프로필 (--class-picker 모드에서 웹 UI 체크박스로 선택)
 # ---------------------------------------------------------------------------
@@ -63,6 +79,3 @@ monitor:
 #   ReadOnlyUser        — SELECT 단독 테스트
 #   UpdateOnlyUser      — UPDATE 단독 테스트
 #   DeleteOnlyUser      — DELETE 단독 테스트
-#
-# [모니터링]
-#   DBMonitorUser       — 부하 없이 DB 상태만 관찰 (외부 부하 모니터링용)

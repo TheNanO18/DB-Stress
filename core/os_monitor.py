@@ -1,0 +1,316 @@
+"""
+OS 레벨 모니터링 — Docker / 로컬(psutil) / 원격(SSH) 자동 감지
+
+우선순위:
+1. docker.enabled=true → docker stats 로 컨테이너 단위 CPU% 측정
+2. database.host가 localhost → psutil로 호스트 전체 메트릭
+3. database.host가 원격 → SSH로 원격 서버 메트릭
+"""
+
+import re
+import subprocess
+import time
+
+from core.config import get_config
+
+# psutil — 로컬 모니터링용 (선택적)
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
+
+# paramiko — 원격 모니터링용 (선택적)
+try:
+    import paramiko
+    _HAS_PARAMIKO = True
+except ImportError:
+    _HAS_PARAMIKO = False
+
+
+class OsMonitor:
+    """
+    Docker / 로컬 / 원격을 자동 감지하여 OS 메트릭을 수집하는 통합 모니터.
+
+    사용법:
+        monitor = OsMonitor()
+        cpu = monitor.get_cpu_percent()
+        mem = monitor.get_memory_percent()
+        disk = monitor.get_disk_io()
+        monitor.close()
+    """
+
+    def __init__(self):
+        cfg = get_config()
+        self._is_local = cfg.is_local_db
+        self._ssh_client = None
+        self._available = False
+        self._mode = "none"
+
+        # Docker 모드가 최우선
+        self._docker_enabled = cfg.docker_enabled
+        self._docker_container = cfg.docker_container_name
+
+        print(f"[OsMonitor] DB host='{cfg.db_host}', is_local={self._is_local}, "
+              f"docker={self._docker_enabled}, psutil={_HAS_PSUTIL}, paramiko={_HAS_PARAMIKO}")
+
+        if self._docker_enabled and self._docker_container:
+            if self._is_local:
+                self._init_docker_local()
+            else:
+                if _HAS_PARAMIKO:
+                    self._connect_ssh(cfg)
+                    if self._ssh_client:
+                        self._mode = f"docker(SSH:{cfg.db_host}:{self._docker_container})"
+                        print(f"[OsMonitor] 원격 Docker 모드 — SSH로 컨테이너 '{self._docker_container}' 모니터링")
+                else:
+                    print(f"[OsMonitor] 원격 Docker 모드이나 paramiko 미설치 — OS 모니터링 비활성")
+        elif self._is_local:
+            if _HAS_PSUTIL:
+                self._available = True
+                self._mode = "local(psutil)"
+                print(f"[OsMonitor] 로컬 모드 — psutil로 OS 메트릭 수집")
+            else:
+                print(f"[OsMonitor] 로컬 모드이나 psutil 미설치 — OS 모니터링 비활성")
+        else:
+            # 원격 모드: SSH로만 OS 메트릭 수집 가능
+            if _HAS_PARAMIKO:
+                self._connect_ssh(cfg)
+            if not self._available:
+                print(f"[OsMonitor] 원격 DB({cfg.db_host})의 OS 모니터링에는 SSH 접속이 필요합니다")
+                print(f"[OsMonitor] config.yaml의 ssh 섹션에 password 또는 key_file을 설정하세요")
+                print(f"[OsMonitor] OS 모니터링 비활성 (DB 응답시간·트랜잭션·행 수는 정상 수집됩니다)")
+
+    def _init_docker_local(self):
+        """로컬 Docker 컨테이너 모니터링을 초기화합니다."""
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Running}}", self._docker_container],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and "true" in result.stdout.lower():
+                self._available = True
+                self._mode = f"docker(local:{self._docker_container})"
+                print(f"[OsMonitor] 로컬 Docker 모드 — 컨테이너 '{self._docker_container}' 모니터링")
+            else:
+                print(f"[OsMonitor] 컨테이너 '{self._docker_container}'를 찾을 수 없거나 실행 중이 아닙니다")
+                # Docker 실패 시 psutil 폴백
+                if _HAS_PSUTIL:
+                    self._available = True
+                    self._docker_enabled = False
+                    self._mode = "local(psutil)"
+                    print(f"[OsMonitor] psutil 폴백으로 호스트 전체 메트릭 수집")
+        except FileNotFoundError:
+            print(f"[OsMonitor] docker 명령어를 찾을 수 없습니다 — Docker가 설치되어 있는지 확인하세요")
+            if _HAS_PSUTIL:
+                self._available = True
+                self._docker_enabled = False
+                self._mode = "local(psutil)"
+                print(f"[OsMonitor] psutil 폴백으로 호스트 전체 메트릭 수집")
+        except Exception as e:
+            print(f"[OsMonitor] Docker 초기화 실패: {e}")
+            if _HAS_PSUTIL:
+                self._available = True
+                self._docker_enabled = False
+                self._mode = "local(psutil)"
+
+    def _connect_ssh(self, cfg):
+        """SSH 연결을 수립합니다."""
+        try:
+            self._ssh_client = paramiko.SSHClient()
+            self._ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            connect_kwargs = {
+                "hostname": cfg.db_host,
+                "port": cfg.ssh_port,
+                "username": cfg.ssh_user,
+                "timeout": 10,
+            }
+
+            if cfg.ssh_key_file:
+                connect_kwargs["key_filename"] = cfg.ssh_key_file
+            elif cfg.ssh_password:
+                connect_kwargs["password"] = cfg.ssh_password
+            else:
+                print("[OsMonitor] SSH 인증 정보 없음 — config.yaml의 ssh.password 또는 ssh.key_file을 설정하세요")
+                self._ssh_client = None
+                return
+
+            self._ssh_client.connect(**connect_kwargs)
+            self._available = True
+            if not self._docker_enabled:
+                self._mode = f"remote(SSH:{cfg.db_host})"
+                print(f"[OsMonitor] 원격 모드 — SSH({cfg.db_host}:{cfg.ssh_port})로 OS 메트릭 수집")
+        except Exception as e:
+            print(f"[OsMonitor] SSH 연결 실패: {e}")
+            print(f"[OsMonitor] config.yaml의 ssh 섹션을 확인하세요")
+            self._ssh_client = None
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    # ------------------------------------------------------------------
+    # CPU
+    # ------------------------------------------------------------------
+    def get_cpu_percent(self) -> float:
+        """CPU 사용률(%)을 반환합니다."""
+        if not self._available:
+            return 0.0
+        if self._docker_enabled:
+            return self._docker_cpu_percent()
+        if self._is_local:
+            return psutil.cpu_percent(interval=0.1)
+        return self._ssh_cpu_percent()
+
+    def _docker_cpu_percent(self) -> float:
+        """Docker 컨테이너의 CPU 사용률을 조회합니다."""
+        try:
+            cmd = f"docker stats {self._docker_container} --no-stream --format '{{{{.CPUPerc}}}}'"
+            if self._is_local:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=5,
+                )
+                output = result.stdout.strip()
+            else:
+                output = self._exec_ssh(cmd).strip()
+
+            # "12.34%" → 12.34
+            output = output.strip("'\"")
+            match = re.search(r'([\d.]+)%', output)
+            if match:
+                return float(match.group(1))
+            return 0.0
+        except Exception:
+            return 0.0
+
+    def _ssh_cpu_percent(self) -> float:
+        """SSH로 원격 서버 CPU 사용률을 조회합니다."""
+        try:
+            output = self._exec_ssh("top -bn1 | grep '%Cpu' | head -1")
+            match = re.search(r'(\d+\.?\d*)\s*id', output)
+            if match:
+                idle = float(match.group(1))
+                return round(100.0 - idle, 1)
+            output = self._exec_ssh("mpstat 1 1 2>/dev/null | tail -1")
+            match = re.search(r'(\d+\.?\d*)\s*$', output.strip())
+            if match:
+                idle = float(match.group(1))
+                return round(100.0 - idle, 1)
+            return 0.0
+        except Exception:
+            return 0.0
+
+    # ------------------------------------------------------------------
+    # Memory
+    # ------------------------------------------------------------------
+    def get_memory_percent(self) -> float:
+        """메모리 사용률(%)을 반환합니다."""
+        if not self._available:
+            return 0.0
+        if self._docker_enabled:
+            return self._docker_memory_percent()
+        if self._is_local:
+            return psutil.virtual_memory().percent
+        return self._ssh_memory_percent()
+
+    def _docker_memory_percent(self) -> float:
+        """Docker 컨테이너의 메모리 사용률을 조회합니다."""
+        try:
+            cmd = f"docker stats {self._docker_container} --no-stream --format '{{{{.MemPerc}}}}'"
+            if self._is_local:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=5,
+                )
+                output = result.stdout.strip()
+            else:
+                output = self._exec_ssh(cmd).strip()
+
+            output = output.strip("'\"")
+            match = re.search(r'([\d.]+)%', output)
+            if match:
+                return float(match.group(1))
+            return 0.0
+        except Exception:
+            return 0.0
+
+    def _ssh_memory_percent(self) -> float:
+        """SSH로 원격 서버 메모리 사용률을 조회합니다."""
+        try:
+            output = self._exec_ssh("free -m | grep Mem")
+            parts = output.split()
+            if len(parts) >= 3:
+                total = float(parts[1])
+                used = float(parts[2])
+                if total > 0:
+                    return round(used / total * 100, 1)
+            return 0.0
+        except Exception:
+            return 0.0
+
+    # ------------------------------------------------------------------
+    # Disk I/O
+    # ------------------------------------------------------------------
+    def get_disk_io(self) -> tuple:
+        """(read_kb_s, write_kb_s) 튜플을 반환합니다."""
+        if not self._available:
+            return (0, 0)
+        if self._is_local and not self._docker_enabled:
+            return self._local_disk_io()
+        if self._ssh_client:
+            return self._ssh_disk_io()
+        return (0, 0)
+
+    def _local_disk_io(self) -> tuple:
+        """psutil로 로컬 디스크 I/O를 측정합니다."""
+        io1 = psutil.disk_io_counters()
+        time.sleep(0.1)
+        io2 = psutil.disk_io_counters()
+        read_kb_s = int((io2.read_bytes - io1.read_bytes) / 1024 * 10)
+        write_kb_s = int((io2.write_bytes - io1.write_bytes) / 1024 * 10)
+        return (read_kb_s, write_kb_s)
+
+    def _ssh_disk_io(self) -> tuple:
+        """SSH로 원격 서버 디스크 I/O를 측정합니다."""
+        try:
+            output = self._exec_ssh("iostat -dk 1 2 2>/dev/null | tail -n +7")
+            total_read = 0
+            total_write = 0
+            for line in output.strip().split('\n'):
+                parts = line.split()
+                if len(parts) >= 4 and not parts[0].startswith('Device'):
+                    try:
+                        total_read += int(float(parts[2]))
+                        total_write += int(float(parts[3]))
+                    except (ValueError, IndexError):
+                        pass
+            return (total_read, total_write)
+        except Exception:
+            return (0, 0)
+
+    # ------------------------------------------------------------------
+    # SSH 실행 헬퍼
+    # ------------------------------------------------------------------
+    def _exec_ssh(self, command: str) -> str:
+        """SSH로 명령어를 실행하고 stdout을 반환합니다."""
+        if not self._ssh_client:
+            return ""
+        _, stdout, _ = self._ssh_client.exec_command(command, timeout=5)
+        return stdout.read().decode("utf-8", errors="replace")
+
+    # ------------------------------------------------------------------
+    # 정리
+    # ------------------------------------------------------------------
+    def close(self):
+        """SSH 연결을 종료합니다."""
+        if self._ssh_client:
+            try:
+                self._ssh_client.close()
+            except Exception:
+                pass
+            self._ssh_client = None
+            self._available = False

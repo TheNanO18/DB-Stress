@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>CUBRID Monitor Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e; color: #e0e0e0;
+            font-family: 'Segoe UI', sans-serif; padding: 16px;
+        }
+        h1 { text-align: center; margin-bottom: 12px; font-size: 20px; color: #00d4aa; }
+        .status-bar {
+            text-align: center; margin-bottom: 16px; font-size: 13px; color: #888;
+        }
+        .status-bar .mode { color: #00d4aa; font-weight: bold; }
+        .status-bar .time { color: #aaa; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .card {
+            background: #16213e; border-radius: 8px;
+            padding: 12px; border: 1px solid #0f3460;
+        }
+        .card h3 {
+            font-size: 13px; color: #00d4aa; margin-bottom: 8px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .card h3 .value {
+            font-size: 18px; color: #fff; font-weight: bold;
+        }
+        canvas { width: 100% !important; height: 180px !important; }
+        .back-link {
+            display: block; text-align: center; margin-top: 16px;
+            color: #00d4aa; text-decoration: none; font-size: 13px;
+        }
+        .back-link:hover { text-decoration: underline; }
+        @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <h1>CUBRID Stress Monitor</h1>
+    <div class="status-bar">
+        Mode: <span class="mode" id="mode">-</span>
+        &nbsp;|&nbsp;
+        Last update: <span class="time" id="lastUpdate">-</span>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h3>CPU Usage <span class="value" id="cpuVal">-</span></h3>
+            <canvas id="cpuChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>Memory Usage <span class="value" id="memVal">-</span></h3>
+            <canvas id="memChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>Disk I/O (KB/s) <span class="value" id="diskVal">-</span></h3>
+            <canvas id="diskChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>DB Response Probe <span class="value" id="rtVal">-</span></h3>
+            <canvas id="rtChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>Table Row Count <span class="value" id="rowVal">-</span></h3>
+            <canvas id="rowChart"></canvas>
+        </div>
+        <div class="card">
+            <h3>Transactions / Locks <span class="value" id="txVal">-</span></h3>
+            <canvas id="txChart"></canvas>
+        </div>
+    </div>
+
+    <a class="back-link" href="/">← Back to Locust Dashboard</a>
+
+<script>
+const CHART_OPTS = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 0 },
+    scales: {
+        x: { display: false },
+        y: { beginAtZero: true, ticks: { color: '#888', font: { size: 10 } }, grid: { color: '#1f3366' } }
+    },
+    plugins: { legend: { display: false } },
+    elements: { point: { radius: 0 }, line: { borderWidth: 1.5 } }
+};
+
+function makeChart(id, datasets) {
+    const ctx = document.getElementById(id).getContext('2d');
+    return new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets },
+        options: JSON.parse(JSON.stringify(CHART_OPTS))
+    });
+}
+
+function ds(label, color) {
+    return { label, data: [], borderColor: color, backgroundColor: color + '20', fill: true, tension: 0.3 };
+}
+
+const cpuChart = makeChart('cpuChart', [ds('CPU %', '#ff6384')]);
+const memChart = makeChart('memChart', [ds('Memory %', '#36a2eb')]);
+const diskChart = makeChart('diskChart', [ds('Read', '#4bc0c0'), ds('Write', '#ff9f40')]);
+diskChart.options.plugins.legend = { display: true, labels: { color: '#aaa', font: { size: 10 } } };
+const rtChart = makeChart('rtChart', [ds('Response (ms)', '#9966ff')]);
+const rowChart = makeChart('rowChart', [ds('Rows', '#ffcd56')]);
+const txChart = makeChart('txChart', [ds('Active TX', '#4bc0c0'), ds('Lock Waiters', '#ff6384')]);
+txChart.options.plugins.legend = { display: true, labels: { color: '#aaa', font: { size: 10 } } };
+
+function formatTime(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString('ko-KR', { hour12: false });
+}
+
+function last(arr) { return arr.length ? arr[arr.length - 1] : 0; }
+
+async function fetchData() {
+    try {
+        const resp = await fetch('/monitor/data');
+        const d = await resp.json();
+        const labels = d.timestamps.map(formatTime);
+
+        cpuChart.data.labels = labels;
+        cpuChart.data.datasets[0].data = d.cpu_percent;
+        cpuChart.update();
+        document.getElementById('cpuVal').textContent = last(d.cpu_percent).toFixed(1) + '%';
+
+        memChart.data.labels = labels;
+        memChart.data.datasets[0].data = d.memory_percent;
+        memChart.update();
+        document.getElementById('memVal').textContent = last(d.memory_percent).toFixed(1) + '%';
+
+        diskChart.data.labels = labels;
+        diskChart.data.datasets[0].data = d.disk_read_kb_s;
+        diskChart.data.datasets[1].data = d.disk_write_kb_s;
+        diskChart.update();
+        document.getElementById('diskVal').textContent =
+            'R:' + last(d.disk_read_kb_s) + ' W:' + last(d.disk_write_kb_s);
+
+        rtChart.data.labels = labels;
+        rtChart.data.datasets[0].data = d.response_time_ms;
+        rtChart.update();
+        document.getElementById('rtVal').textContent = last(d.response_time_ms).toFixed(1) + 'ms';
+
+        rowChart.data.labels = labels;
+        rowChart.data.datasets[0].data = d.row_count;
+        rowChart.update();
+        document.getElementById('rowVal').textContent = last(d.row_count).toLocaleString();
+
+        txChart.data.labels = labels;
+        txChart.data.datasets[0].data = d.active_transactions;
+        txChart.data.datasets[1].data = d.lock_waiters;
+        txChart.update();
+        document.getElementById('txVal').textContent =
+            'TX:' + last(d.active_transactions) + ' Lock:' + last(d.lock_waiters);
+
+        document.getElementById('mode').textContent = d.mode || '-';
+        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+    } catch (e) {
+        document.getElementById('lastUpdate').textContent = 'fetch error';
+    }
+}
+
+fetchData();
+setInterval(fetchData, 2000);
+</script>
+</body>
+</html>

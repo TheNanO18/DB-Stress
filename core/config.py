@@ -99,6 +99,38 @@ class Config:
     def wait_max(self) -> float:
         return self._data["load_test"]["wait_max"]
 
+    # --- docker 섹션 ---
+    @property
+    def docker_enabled(self) -> bool:
+        return self._data.get("docker", {}).get("enabled", False)
+
+    @property
+    def docker_container_name(self) -> str:
+        return self._data.get("docker", {}).get("container_name", "")
+
+    # --- ssh 섹션 (원격 OS 모니터링) ---
+    @property
+    def ssh_port(self) -> int:
+        return self._data.get("ssh", {}).get("port", 22)
+
+    @property
+    def ssh_user(self) -> str:
+        return self._data.get("ssh", {}).get("user", "root")
+
+    @property
+    def ssh_password(self) -> str:
+        return self._data.get("ssh", {}).get("password", "")
+
+    @property
+    def ssh_key_file(self) -> str:
+        return self._data.get("ssh", {}).get("key_file", "")
+
+    @property
+    def is_local_db(self) -> bool:
+        """DB 서버가 로컬인지 판별합니다."""
+        host = self.db_host.strip().lower()
+        return host in ("localhost", "127.0.0.1", "::1", "")
+
     # --- scenario_weights 섹션 ---
     @property
     def scenario_weights(self) -> dict:
