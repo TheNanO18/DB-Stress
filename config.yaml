@@ -37,6 +37,12 @@ load_test:
   wait_min: 0.1
   wait_max: 1.0
 
+# DB 모니터링 설정 (DBMonitorUser 전용)
+monitor:
+  # 모니터링 조회 간격 (초) — 너무 짧으면 모니터링 자체가 부하가 됨
+  interval_min: 1.0
+  interval_max: 2.0
+
 # ---------------------------------------------------------------------------
 # 시나리오 프로필 (--class-picker 모드에서 웹 UI 체크박스로 선택)
 # ---------------------------------------------------------------------------
@@ -57,3 +63,6 @@ load_test:
 #   ReadOnlyUser        — SELECT 단독 테스트
 #   UpdateOnlyUser      — UPDATE 단독 테스트
 #   DeleteOnlyUser      — DELETE 단독 테스트
+#
+# [모니터링]
+#   DBMonitorUser       — 부하 없이 DB 상태만 관찰 (외부 부하 모니터링용)

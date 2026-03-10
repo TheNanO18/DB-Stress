@@ -439,3 +439,145 @@ class DeleteOnlyUser(_CubridMixin, User):
         pk = random.randint(1, self._get_max_id())
         sql = f"DELETE FROM {self.table} WHERE id = ?"
         self.client.execute("DELETE", "[DeleteOnly] delete", sql, (pk,))
+
+
+# ===========================================================================
+# 11. DB Monitor — 외부 부하 관찰용 (부하를 주지 않고 DB 상태만 모니터링)
+# ===========================================================================
+class DBMonitorUser(User):
+    """
+    DB에 부하를 주지 않고 상태만 주기적으로 관찰합니다.
+
+    외부 애플리케이션이 JDBC로 부하를 줄 때, 이 시나리오만 선택하면
+    Locust 대시보드에서 DB 상태 변화를 실시간으로 모니터링할 수 있습니다.
+
+    관찰 항목:
+    - 응답 시간 프로브 (SELECT 1건으로 DB 응답성 측정)
+    - 테이블 행 수 변화 (외부 INSERT/DELETE 감지)
+    - 활성 트랜잭션 수 (동시 접속 세션 수)
+    - Lock 대기 건수 (Lock 경합 감지)
+    """
+
+    # 모니터링은 1~2초 간격으로 (부하를 주지 않기 위해 느리게)
+    wait_time = between(
+        _cfg.raw.get("monitor", {}).get("interval_min", 1.0),
+        _cfg.raw.get("monitor", {}).get("interval_max", 2.0),
+    )
+
+    def on_start(self):
+        self.client = CubridClient()
+        self.table = _cfg.table_name
+        self._prev_row_count = None
+
+    def on_stop(self):
+        self.client.close()
+
+    @task(3)
+    def probe_response_time(self):
+        """응답 시간 프로브 — 가장 가벼운 SELECT로 DB 응답성을 측정합니다."""
+        sql = f"SELECT 1 FROM {self.table} WHERE ROWNUM <= 1"
+        self.client.execute("MONITOR", "[Monitor] response_probe", sql, fetch=True)
+
+    @task(2)
+    def check_row_count(self):
+        """행 수 추적 — 테이블의 현재 행 수를 조회합니다."""
+        sql = f"SELECT COUNT(*) FROM {self.table}"
+        start = time.perf_counter()
+        cursor = self.client._conn.cursor()
+        try:
+            cursor.execute(sql)
+            row = cursor.fetchone()
+            count = row[0] if row else 0
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            # 행 수를 response_length로 기록 (차트에서 변화 추적 가능)
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] row_count",
+                response_time=elapsed_ms,
+                response_length=count,
+                exception=None,
+            )
+
+            # 변화 감지 시 콘솔 출력
+            if self._prev_row_count is not None and count != self._prev_row_count:
+                diff = count - self._prev_row_count
+                sign = "+" if diff > 0 else ""
+                print(f"[Monitor] 행 수 변화: {self._prev_row_count} → {count} ({sign}{diff})")
+            self._prev_row_count = count
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] row_count",
+                response_time=elapsed_ms,
+                response_length=0,
+                exception=e,
+            )
+        finally:
+            cursor.close()
+
+    @task(2)
+    def check_active_transactions(self):
+        """활성 트랜잭션 — 현재 활성 트랜잭션(세션) 수를 조회합니다."""
+        sql = "SELECT COUNT(*) FROM db_tran_lock"
+        start = time.perf_counter()
+        cursor = self.client._conn.cursor()
+        try:
+            cursor.execute(sql)
+            row = cursor.fetchone()
+            count = row[0] if row else 0
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] active_transactions",
+                response_time=elapsed_ms,
+                response_length=count,
+                exception=None,
+            )
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] active_transactions",
+                response_time=elapsed_ms,
+                response_length=0,
+                exception=e,
+            )
+        finally:
+            cursor.close()
+
+    @task(1)
+    def check_lock_waiters(self):
+        """Lock 대기 — Lock 대기 중인 트랜잭션 수를 조회합니다."""
+        sql = "SELECT COUNT(*) FROM db_tran_lock WHERE is_blocked = 1"
+        start = time.perf_counter()
+        cursor = self.client._conn.cursor()
+        try:
+            cursor.execute(sql)
+            row = cursor.fetchone()
+            count = row[0] if row else 0
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] lock_waiters",
+                response_time=elapsed_ms,
+                response_length=count,
+                exception=None,
+            )
+
+            if count > 0:
+                print(f"[Monitor] Lock 대기 감지: {count}건")
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            events.request.fire(
+                request_type="MONITOR",
+                name="[Monitor] lock_waiters",
+                response_time=elapsed_ms,
+                response_length=0,
+                exception=e,
+            )
+        finally:
+            cursor.close()
