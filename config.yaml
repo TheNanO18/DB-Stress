@@ -3,10 +3,10 @@
 ###############################################################################
 
 database:
-  host: "192.168.100.41"
+  host: "localhost"
   port: 33000
-  name: "hadb"
-  user: ""
+  name: "demodb"
+  user: "dba"
   password: ""
 
 # 테스트용 테이블 설정
@@ -17,7 +17,7 @@ table:
   # 테스트 시작 시 자동 삽입할 시드 데이터 건수
   # SELECT/UPDATE/DELETE 시나리오가 빈 테이블에서 허공을 치지 않도록 보장
   # 0이면 시드 삽입 없이 시작
-  seed_rows: 1000
+  seed_rows: 10
 
 # 더미 데이터 풀 설정 (Pre-generation)
 data_pool:
@@ -44,18 +44,26 @@ monitor:
   interval_max: 2.0
 
 # Docker 컨테이너 모니터링 설정
-# DB가 Docker 컨테이너로 실행 중일 때 컨테이너 단위 CPU 사용률을 측정합니다.
-# enabled: true 이면 호스트 전체가 아닌 해당 컨테이너의 CPU%만 표시합니다.
+# DB가 Docker 컨테이너로 실행 중일 때 컨테이너 단위 CPU/메모리를 측정합니다.
+# containers에 여러 컨테이너를 등록하면 개별 모니터링됩니다.
+# name: docker ps에서 보이는 컨테이너 이름 (Swarm은 서비스명 접두사만 입력해도 자동 매칭)
+# label: 대시보드에 표시할 라벨
 docker:
-  enabled: false
-  container_name: "cubrid-db"
+  enabled: true
+  containers:
+    - name: "cubrid-ha_cubmaster"
+      label: "Master"
+    - name: "cubrid-ha_cubslave"
+      label: "Slave"
+    - name: "cubrid-ha_cubbroker"
+      label: "Broker"
 
 # SSH 원격 모니터링 설정 (DB 서버가 원격일 때 OS 메트릭 수집용)
 # database.host가 localhost/127.0.0.1이면 psutil(로컬)을 사용하고,
 # 그 외에는 SSH로 원격 서버에 접속하여 OS 메트릭을 수집합니다.
 ssh:
   port: 22
-  user: ""
+  user: "root"
   password: ""
   key_file: ""
 

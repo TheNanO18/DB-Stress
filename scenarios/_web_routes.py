@@ -43,6 +43,22 @@ def on_init(environment, **kwargs):
     # Locust 메인 페이지에 Monitor 링크 배너를 주입하는 미들웨어
     _original_app = environment.web_ui.app
 
+    # 시나리오 클래스명 → 한국어 설명 매핑
+    _class_descriptions = {
+        "BulkInsertUser": "대량 INSERT — 디스크 I/O, 인덱스 부하",
+        "ReadIntensiveUser": "읽기 집중 — PK SELECT로 최대 TPS 측정",
+        "LockContentionUser": "Lock 경합 — 동일 행 동시 UPDATE",
+        "HeavyQueryUser": "Heavy 쿼리 — 셀프 조인, 풀스캔, 대량 정렬",
+        "ConnectionChurnUser": "Connection Churn — 연결 생성/해제 반복",
+        "CrudMixUser": "CRUD 종합 — INSERT/SELECT/UPDATE/DELETE 균등 실행",
+        "CreateOnlyUser": "Create 단독 — INSERT만 반복 실행",
+        "ReadOnlyUser": "Read 단독 — PK SELECT만 반복 실행",
+        "UpdateOnlyUser": "Update 단독 — UPDATE만 반복 실행",
+        "DeleteOnlyUser": "Delete 단독 — DELETE만 반복 실행",
+        "DBMonitorUser": "DB 모니터 — 부하 없이 상태만 관찰",
+    }
+    _desc_json = json.dumps(_class_descriptions, ensure_ascii=False)
+
     @_original_app.after_request
     def inject_monitor_link(response):
         if response.content_type and "text/html" in response.content_type:
@@ -56,6 +72,29 @@ def on_init(environment, **kwargs):
                 '&#128202; CUBRID Stress Monitor Dashboard &rarr;'
                 '</a></div>'
                 '<script>document.body.style.paddingTop="36px";</script>'
+                '<script>'
+                '(function(){'
+                '  var desc=' + _desc_json + ';'
+                '  function addDesc(){'
+                '    var cells=document.querySelectorAll("td.MuiTableCell-root");'
+                '    cells.forEach(function(td){'
+                '      var txt=td.textContent.trim();'
+                '      if(desc[txt] && !td.dataset.descAdded){'
+                '        td.dataset.descAdded="1";'
+                '        var span=document.createElement("span");'
+                '        span.style.cssText='
+                '          "color:#888;font-size:0.85em;margin-left:8px;'
+                '           font-style:italic;";'
+                '        span.textContent="("+desc[txt]+")";'
+                '        td.appendChild(span);'
+                '      }'
+                '    });'
+                '  }'
+                '  var observer=new MutationObserver(function(){addDesc();});'
+                '  observer.observe(document.body,{childList:true,subtree:true});'
+                '  addDesc();'
+                '})();'
+                '</script>'
             )
             data = response.get_data(as_text=True)
             if '/monitor' not in data and '<body' in data.lower():

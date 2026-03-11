@@ -1,22 +1,60 @@
 """
 config.yaml 파싱 및 설정 관리 클래스
+
+환경별로 달라지는 민감한 값(DB 접속정보, SSH 정보 등)은 프로젝트 루트의
+.env 파일에 정의하면 config.yaml 값을 자동으로 오버라이드합니다.
+.env.example 파일을 참고하세요.
 """
 
 import os
 import yaml
+from dotenv import load_dotenv
 
 
-_DEFAULT_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "config.yaml"
-)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+_DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "config.yaml")
+
+# .env 파일이 있으면 환경변수로 로드 (기존 환경변수는 덮어쓰지 않음)
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+
+
+def _env(key: str, default=None, cast=None):
+    """환경변수 값을 가져오고, 없으면 default를 반환합니다."""
+    val = os.environ.get(key)
+    if val is None or val == "":
+        return default
+    if cast is not None:
+        return cast(val)
+    return val
 
 
 class Config:
-    """YAML 설정 파일을 로드하고 각 섹션에 대한 접근자를 제공합니다."""
+    """YAML 설정 파일을 로드하고 각 섹션에 대한 접근자를 제공합니다.
+
+    .env 환경변수가 설정되어 있으면 YAML 값보다 우선합니다.
+    """
 
     def __init__(self, path: str = _DEFAULT_CONFIG_PATH):
         with open(path, "r", encoding="utf-8") as f:
             self._data: dict = yaml.safe_load(f)
+
+        # .env 환경변수로 YAML 값 오버라이드
+        self._apply_env_overrides()
+
+    def _apply_env_overrides(self):
+        """환경변수(.env)가 설정되어 있으면 YAML 값을 오버라이드합니다."""
+        db = self._data.setdefault("database", {})
+        db["host"] = _env("DB_HOST", db.get("host", "localhost"))
+        db["port"] = _env("DB_PORT", db.get("port", 33000), cast=int)
+        db["name"] = _env("DB_NAME", db.get("name", "demodb"))
+        db["user"] = _env("DB_USER", db.get("user", "dba"))
+        db["password"] = _env("DB_PASSWORD", db.get("password", ""))
+
+        ssh = self._data.setdefault("ssh", {})
+        ssh["port"] = _env("SSH_PORT", ssh.get("port", 22), cast=int)
+        ssh["user"] = _env("SSH_USER", ssh.get("user", "root"))
+        ssh["password"] = _env("SSH_PASSWORD", ssh.get("password", ""))
+        ssh["key_file"] = _env("SSH_KEY_FILE", ssh.get("key_file", ""))
 
     # --- 원본 딕셔너리 접근 ---
     @property
