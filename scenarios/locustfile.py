@@ -3,7 +3,12 @@ CUBRID 부하 테스트 시나리오 — Locust 진입점
 
 실행 방법:
     cd cubrid_stress_tool
+
+    # 로컬 전용 (본인 PC에서만 접속)
     locust -f scenarios/locustfile.py --class-picker
+
+    # 외부 접속 허용 (같은 네트워크의 다른 PC·모바일에서 접속 가능)
+    locust -f scenarios/locustfile.py --class-picker --web-host 0.0.0.0
 
 --class-picker 옵션을 사용하면 웹 대시보드에서
 원하는 시나리오를 체크박스로 선택하여 실행할 수 있습니다.

@@ -10,7 +10,7 @@ from collections import deque
 class MetricsStore:
     """스레드 안전한 시계열 메트릭 저장소. 동적 키를 지원합니다."""
 
-    def __init__(self, max_points: int = 300):
+    def __init__(self, max_points: int = 3600):
         self._lock = threading.Lock()
         self._max = max_points
         self.mode = "none"  # OsMonitor 모드 (UI 표시용)
