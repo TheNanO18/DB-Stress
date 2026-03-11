@@ -217,19 +217,19 @@ async function fetchData() {
         diskChart.data.datasets[1].data = d.disk_write_kb_s;
         diskChart.update();
         document.getElementById('diskVal').textContent =
-            'R:' + last(d.disk_read_kb_s) + ' W:' + last(d.disk_write_kb_s);
+            'Read:' + last(d.disk_read_kb_s) + ' Write:' + last(d.disk_write_kb_s);
 
         // --- Response Time ---
         rtChart.data.labels = labels;
         rtChart.data.datasets[0].data = d.response_time_ms;
         rtChart.update();
-        document.getElementById('rtVal').textContent = last(d.response_time_ms).toFixed(1) + 'ms';
+        document.getElementById('rtVal').textContent = 'Latency: ' + last(d.response_time_ms).toFixed(1) + 'ms';
 
         // --- Row Count ---
         rowChart.data.labels = labels;
         rowChart.data.datasets[0].data = d.row_count;
         rowChart.update();
-        document.getElementById('rowVal').textContent = last(d.row_count).toLocaleString();
+        document.getElementById('rowVal').textContent = 'Rows: ' + last(d.row_count).toLocaleString();
 
         // --- Transactions / Locks ---
         txChart.data.labels = labels;
@@ -237,7 +237,7 @@ async function fetchData() {
         txChart.data.datasets[1].data = d.lock_waiters;
         txChart.update();
         document.getElementById('txVal').textContent =
-            'TX:' + last(d.active_transactions) + ' Lock:' + last(d.lock_waiters);
+            'Active TX:' + last(d.active_transactions) + ' Lock Waiters:' + last(d.lock_waiters);
 
         document.getElementById('mode').textContent = d.mode || '-';
         document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('ko-KR', { hour12: false });

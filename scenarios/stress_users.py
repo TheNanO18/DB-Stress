@@ -8,7 +8,9 @@
 import random
 import time
 
-from locust import User, task, events
+import gevent
+from gevent import get_hub
+from locust import User, between, task, events
 
 from core.config import get_config
 from core.db_client import CubridClient
@@ -73,13 +75,14 @@ class ReadIntensiveUser(CubridMixin, User):
 # 3. Lock Contention — 단일 Row 병목으로 Lock 대기 유발
 # ===========================================================================
 class LockContentionUser(CubridMixin, User):
-    """동일 행(ID 1~10)에 대한 동시 UPDATE로 Lock 경합을 유발합니다."""
+    """동일 행(ID 1~3)에 대한 동시 UPDATE로 Lock 경합을 유발합니다."""
 
-    wait_time = default_wait_time
+    # Lock 경합을 확실히 유발하기 위해 대기 시간을 최소화
+    wait_time = between(0.01, 0.05)
 
     def on_start(self):
         self._setup()
-        for i in range(10):
+        for i in range(3):
             try:
                 vals = self.pool.pick_values()
                 sql = INSERT_SQL_TEMPLATE.format(self.table)
@@ -91,13 +94,48 @@ class LockContentionUser(CubridMixin, User):
     def on_stop(self):
         self._teardown()
 
+    def _do_lock_update(self, sql, params, hold_ms):
+        """실제 OS 스레드에서 실행 — UPDATE 후 Lock을 유지했다가 commit."""
+        import jpype
+        if not jpype.isThreadAttachedToJVM():
+            jpype.attachThreadToJVM()
+        cursor = self.client._conn.cursor()
+        try:
+            self.client._conn.jconn.setAutoCommit(False)
+            cursor.execute(sql, params)
+            # Java Thread.sleep — gevent monkey-patch 영향 없는 실제 OS 스레드 sleep
+            jpype.java.lang.Thread.sleep(hold_ms)
+            self.client._conn.jconn.commit()
+            return cursor.rowcount, None
+        except Exception as e:
+            self.client._conn.jconn.rollback()
+            return 0, e
+        finally:
+            cursor.close()
+            self.client._conn.jconn.setAutoCommit(True)
+
     @task
     def lock_contention(self):
-        """LOCK — 동일 행에 대한 동시 UPDATE로 Lock 경합 유발."""
-        pk = random.randint(1, 10)
+        """LOCK — 동일 행에 대한 동시 UPDATE + 트랜잭션 유지로 Lock 경합 유발."""
+        pk = random.randint(1, 3)
         new_amount = round(random.uniform(1, 100), 2)
         sql = f"UPDATE {self.table} SET amount = ? WHERE id = ?"
-        self.client.execute("UPDATE", "[LockContention] update_same_row", sql, (new_amount, pk))
+        hold_ms = int(random.uniform(500, 2000))
+
+        start = time.perf_counter()
+        # gevent native threadpool — 실제 OS 스레드 보장 (monkey-patch 영향 없음)
+        rowcount, exc = get_hub().threadpool.apply(
+            self._do_lock_update, (sql, (new_amount, pk), hold_ms)
+        )
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        events.request.fire(
+            request_type="UPDATE",
+            name="[LockContention] update_same_row",
+            response_time=elapsed_ms,
+            response_length=rowcount,
+            exception=exc,
+        )
 
 
 # ===========================================================================

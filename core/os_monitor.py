@@ -55,6 +55,8 @@ class OsMonitor:
         self._docker_enabled = cfg.docker_enabled
         self._docker_containers = cfg.docker_containers  # [{name, label}, ...]
         self._multi_container = len(self._docker_containers) > 1
+        self._prev_block_io = None       # Docker BlockIO 누적값 (read_kb, write_kb)
+        self._prev_block_io_time = 0.0   # 마지막 BlockIO 조회 시각
 
         print(f"[OsMonitor] DB host='{cfg.db_host}', is_local={self._is_local}, "
               f"docker={self._docker_enabled}, containers={len(self._docker_containers)}, "
@@ -335,11 +337,84 @@ class OsMonitor:
         """(read_kb_s, write_kb_s) 튜플을 반환합니다."""
         if not self._available:
             return (0, 0)
-        if self._is_local and not self._docker_enabled:
+        if self._docker_enabled:
+            return self._docker_disk_io()
+        if self._is_local:
             return self._local_disk_io()
         if self._ssh_client:
             return self._ssh_disk_io()
         return (0, 0)
+
+    def _docker_disk_io(self) -> tuple:
+        """Docker 컨테이너의 BlockIO로 디스크 I/O rate(KB/s)를 계산합니다."""
+        try:
+            cmd = "docker stats --no-stream --format '{{.Name}}\\t{{.BlockIO}}'"
+            if self._is_local:
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=10,
+                )
+                output = result.stdout.strip()
+            else:
+                output = self._exec_ssh(cmd).strip()
+
+            total_read_kb = 0.0
+            total_write_kb = 0.0
+            for line in output.split('\n'):
+                line = line.strip().strip("'\"")
+                if not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) < 2:
+                    continue
+                container_name = parts[0].strip("'\"")
+                matched = any(
+                    container_name.startswith(c["name"])
+                    for c in self._docker_containers
+                )
+                if not matched:
+                    continue
+                bio = parts[1].strip().strip("'\"")
+                bio_parts = bio.split('/')
+                if len(bio_parts) == 2:
+                    total_read_kb += self._parse_block_io_kb(bio_parts[0])
+                    total_write_kb += self._parse_block_io_kb(bio_parts[1])
+
+            now = time.time()
+            if self._prev_block_io is not None:
+                dt = now - self._prev_block_io_time
+                if dt > 0:
+                    read_kb_s = int((total_read_kb - self._prev_block_io[0]) / dt)
+                    write_kb_s = int((total_write_kb - self._prev_block_io[1]) / dt)
+                else:
+                    read_kb_s, write_kb_s = 0, 0
+            else:
+                read_kb_s, write_kb_s = 0, 0
+
+            self._prev_block_io = (total_read_kb, total_write_kb)
+            self._prev_block_io_time = now
+            return (max(0, read_kb_s), max(0, write_kb_s))
+        except Exception as e:
+            print(f"[OsMonitor] Docker disk I/O 조회 실패: {e}")
+            return (0, 0)
+
+    @staticmethod
+    def _parse_block_io_kb(s: str) -> float:
+        """Docker stats BlockIO 문자열 (예: '1.23MB')을 KB로 변환합니다."""
+        s = s.strip().strip("'\"")
+        m = re.match(r'([\d.]+)\s*(\w+)', s)
+        if not m:
+            return 0.0
+        val = float(m.group(1))
+        unit = m.group(2).upper()
+        if unit == 'B':
+            return val / 1024
+        if unit in ('KB', 'KIB'):
+            return val
+        if unit in ('MB', 'MIB'):
+            return val * 1024
+        if unit in ('GB', 'GIB'):
+            return val * 1024 * 1024
+        return val
 
     def _local_disk_io(self) -> tuple:
         """psutil로 로컬 디스크 I/O를 측정합니다."""
@@ -377,6 +452,49 @@ class OsMonitor:
             return ""
         _, stdout, _ = self._ssh_client.exec_command(command, timeout=10)
         return stdout.read().decode("utf-8", errors="replace")
+
+    # ------------------------------------------------------------------
+    # DB 컨테이너 명령 실행 (cubrid tranlist 등)
+    # ------------------------------------------------------------------
+    def _resolve_container_id(self, prefix: str) -> str:
+        """Docker 컨테이너 이름 접두사로 컨테이너 ID를 조회합니다."""
+        find_cmd = f"docker ps -q --filter name={prefix}"
+        if self._is_local:
+            result = subprocess.run(
+                find_cmd, shell=True, capture_output=True, text=True, timeout=5,
+            )
+            output = result.stdout.strip()
+        elif self._ssh_client:
+            output = self._exec_ssh(find_cmd).strip()
+        else:
+            return ""
+        # 첫 번째 컨테이너 ID 반환
+        return output.split('\n')[0].strip() if output else ""
+
+    def exec_in_db_container(self, cmd: str) -> str:
+        """DB 서버 컨텍스트에서 명령어를 실행합니다 (Docker/SSH/로컬 자동 감지)."""
+        try:
+            if self._docker_enabled and self._docker_containers:
+                prefix = self._docker_containers[0]["name"]
+                container_id = self._resolve_container_id(prefix)
+                if not container_id:
+                    print(f"[OsMonitor] 컨테이너 '{prefix}'를 찾을 수 없습니다")
+                    return ""
+                full_cmd = f'docker exec {container_id} bash -l -c "{cmd}"'
+            else:
+                full_cmd = cmd
+
+            if self._is_local:
+                result = subprocess.run(
+                    full_cmd, shell=True, capture_output=True, text=True, timeout=15,
+                )
+                return result.stdout
+            elif self._ssh_client:
+                return self._exec_ssh(full_cmd)
+            return ""
+        except Exception as e:
+            print(f"[OsMonitor] 명령 실행 실패: {e}")
+            return ""
 
     # ------------------------------------------------------------------
     # 정리
