@@ -10,6 +10,8 @@ from core.config import get_config
 from core.db_client import CubridClient
 from data.generator import get_data_pool
 
+from core.metrics_store import get_metrics_store
+
 from ._shared import (
     max_id,
     CREATE_TABLE_SQL,
@@ -18,6 +20,7 @@ from ._shared import (
 )
 
 _cfg = get_config()
+_metrics = get_metrics_store()
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +82,11 @@ def on_init_parser(parser, **kwargs):
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
     """Locust 테스트가 시작될 때 테이블 초기화, 시드 데이터 삽입, 데이터 풀 워밍업."""
+
+    # 이전 테스트의 메트릭 데이터 초기화 (재시작 시 차트 오염 방지)
+    _metrics.reset()
+    max_id.set(0)
+    print("[Init] 메트릭 저장소 초기화 완료")
 
     # ---------------------------------------------------------------
     # 웹 UI 파라미터로 DB 접속 정보 동적 오버라이드
@@ -193,3 +201,14 @@ def on_test_start(environment, **kwargs):
     if runner and runner.user_classes:
         names = [cls.__name__ for cls in runner.user_classes]
         print(f"[Init] 활성 시나리오: {', '.join(names)}")
+
+
+# ---------------------------------------------------------------------------
+# 테스트 종료 시 정리
+# ---------------------------------------------------------------------------
+@events.test_stop.add_listener
+def on_test_stop(environment, **kwargs):
+    """Locust 테스트가 종료될 때 글로벌 상태를 정리합니다."""
+    print("[Stop] 테스트 종료 — 리소스 정리 중...")
+    max_id.set(0)
+    print("[Stop] 테스트 종료 완료. 새 테스트를 시작할 수 있습니다.")

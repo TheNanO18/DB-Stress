@@ -69,6 +69,14 @@ class MetricsStore:
                         prev = self._data[key][-1] if self._data[key] else 0
                         self._data[key].append(prev)
 
+    def reset(self):
+        """모든 시계열 데이터를 초기화합니다. 테스트 재시작 시 호출합니다."""
+        with self._lock:
+            for key in self._data:
+                self._data[key].clear()
+            self._container_labels = []
+            self.mode = "none"
+
     def snapshot(self) -> dict:
         """현재까지의 모든 데이터를 JSON 직렬화 가능한 dict로 반환합니다."""
         with self._lock:
