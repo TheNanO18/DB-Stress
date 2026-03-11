@@ -4,8 +4,10 @@ Locust 웹 UI 확장 — 모니터링 대시보드 라우트 및 배너 주입
 import 시점에 @events.init 데코레이터가 자동으로 리스너를 등록합니다.
 """
 
+import io
 import json
 import os
+from datetime import datetime
 
 from locust import events
 
@@ -38,6 +40,88 @@ def on_init(environment, **kwargs):
         data["mode"] = _metrics.mode
         return Response(
             json.dumps(data), content_type="application/json"
+        )
+
+    @environment.web_ui.app.route("/monitor/export/excel")
+    def monitor_export_excel():
+        """모니터링 시계열 데이터를 Excel(.xlsx)로 내보냅니다."""
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        data = _metrics.snapshot()
+        timestamps = data.pop("timestamps", [])
+        data.pop("mode", None)
+        container_labels = data.pop("container_labels", [])
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Monitor Data"
+
+        # 헤더 스타일
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_fill = PatternFill(start_color="16213E", end_color="16213E", fill_type="solid")
+
+        # 컬럼 구성: Time + 각 metric 키
+        metric_keys = [k for k in data.keys() if isinstance(data[k], list)]
+        headers = ["Time"] + metric_keys
+
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+
+        # 데이터 행
+        for row_idx, ts in enumerate(timestamps, 2):
+            time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            ws.cell(row=row_idx, column=1, value=time_str)
+            for col_idx, key in enumerate(metric_keys, 2):
+                values = data[key]
+                val = values[row_idx - 2] if (row_idx - 2) < len(values) else None
+                ws.cell(row=row_idx, column=col_idx, value=val)
+
+        # 컬럼 너비 자동 조정
+        ws.column_dimensions["A"].width = 22
+        for col_idx in range(2, len(headers) + 1):
+            ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else "A"].width = 18
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"cubrid_monitor_{now_str}.xlsx"
+        return Response(
+            buf.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
+    @environment.web_ui.app.route("/monitor/export/csv")
+    def monitor_export_csv():
+        """모니터링 시계열 데이터를 CSV로 내보냅니다."""
+        data = _metrics.snapshot()
+        timestamps = data.pop("timestamps", [])
+        data.pop("mode", None)
+        data.pop("container_labels", [])
+
+        metric_keys = [k for k in data.keys() if isinstance(data[k], list)]
+        lines = [",".join(["Time"] + metric_keys)]
+
+        for i, ts in enumerate(timestamps):
+            time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            row = [time_str]
+            for key in metric_keys:
+                values = data[key]
+                row.append(str(values[i]) if i < len(values) else "")
+            lines.append(",".join(row))
+
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"cubrid_monitor_{now_str}.csv"
+        return Response(
+            "\n".join(lines),
+            content_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
     # Locust 메인 페이지에 Monitor 링크 배너를 주입하는 미들웨어

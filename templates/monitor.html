@@ -40,6 +40,21 @@
             color: #00d4aa; text-decoration: none; font-size: 13px;
         }
         .back-link:hover { text-decoration: underline; }
+        .export-bar {
+            text-align: center; margin-bottom: 16px;
+            display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;
+        }
+        .export-btn {
+            background: #0f3460; color: #00d4aa; border: 1px solid #00d4aa;
+            padding: 6px 14px; border-radius: 4px; cursor: pointer;
+            font-size: 12px; font-family: inherit; transition: background 0.2s;
+        }
+        .export-btn:hover { background: #1a4a7a; }
+        .card h3 .dl-icon {
+            cursor: pointer; font-size: 14px; opacity: 0.5; transition: opacity 0.2s;
+            margin-left: 6px; color: #aaa;
+        }
+        .card h3 .dl-icon:hover { opacity: 1; color: #00d4aa; }
         @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
     </style>
 </head>
@@ -51,29 +66,35 @@
         Last update: <span class="time" id="lastUpdate">-</span>
     </div>
 
+    <div class="export-bar">
+        <button class="export-btn" onclick="exportExcel()">&#128202; Excel 다운로드</button>
+        <button class="export-btn" onclick="exportCSV()">&#128196; CSV 다운로드</button>
+        <button class="export-btn" onclick="exportAllCharts()">&#128247; 전체 그래프 PNG 다운로드</button>
+    </div>
+
     <div class="grid">
         <div class="card">
-            <h3>CPU Usage <span class="value" id="cpuVal">-</span></h3>
+            <h3>CPU Usage <span class="value" id="cpuVal">-</span><span class="dl-icon" onclick="downloadChart('cpuChart','cpu')" title="PNG 저장">&#11015;</span></h3>
             <canvas id="cpuChart"></canvas>
         </div>
         <div class="card">
-            <h3>Memory Usage <span class="value" id="memVal">-</span></h3>
+            <h3>Memory Usage <span class="value" id="memVal">-</span><span class="dl-icon" onclick="downloadChart('memChart','memory')" title="PNG 저장">&#11015;</span></h3>
             <canvas id="memChart"></canvas>
         </div>
         <div class="card">
-            <h3>Disk I/O (KB/s) <span class="value" id="diskVal">-</span></h3>
+            <h3>Disk I/O (KB/s) <span class="value" id="diskVal">-</span><span class="dl-icon" onclick="downloadChart('diskChart','disk_io')" title="PNG 저장">&#11015;</span></h3>
             <canvas id="diskChart"></canvas>
         </div>
         <div class="card">
-            <h3>DB Response Probe <span class="value" id="rtVal">-</span></h3>
+            <h3>DB Response Probe <span class="value" id="rtVal">-</span><span class="dl-icon" onclick="downloadChart('rtChart','response_time')" title="PNG 저장">&#11015;</span></h3>
             <canvas id="rtChart"></canvas>
         </div>
         <div class="card">
-            <h3>Table Row Count <span class="value" id="rowVal">-</span></h3>
+            <h3>Table Row Count <span class="value" id="rowVal">-</span><span class="dl-icon" onclick="downloadChart('rowChart','row_count')" title="PNG 저장">&#11015;</span></h3>
             <canvas id="rowChart"></canvas>
         </div>
         <div class="card">
-            <h3>Transactions / Locks <span class="value" id="txVal">-</span></h3>
+            <h3>Transactions / Locks <span class="value" id="txVal">-</span><span class="dl-icon" onclick="downloadChart('txChart','transactions')" title="PNG 저장">&#11015;</span></h3>
             <canvas id="txChart"></canvas>
         </div>
     </div>
@@ -86,7 +107,7 @@ const CHART_OPTS = {
     maintainAspectRatio: false,
     animation: { duration: 0 },
     scales: {
-        x: { display: false },
+        x: { display: true, ticks: { color: '#666', font: { size: 9 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } },
         y: { beginAtZero: true, ticks: { color: '#888', font: { size: 10 } }, grid: { color: '#1f3366' } }
     },
     plugins: { legend: { display: false } },
@@ -227,6 +248,36 @@ async function fetchData() {
 
 fetchData();
 setInterval(fetchData, 2000);
+
+// --- 다운로드 기능 ---
+const chartMap = {
+    cpuChart: () => cpuChart,
+    memChart: () => memChart,
+    diskChart: () => diskChart,
+    rtChart: () => rtChart,
+    rowChart: () => rowChart,
+    txChart: () => txChart
+};
+
+function downloadChart(chartId, name) {
+    const chart = chartMap[chartId]();
+    const url = chart.toBase64Image('image/png', 1);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cubrid_' + name + '_' + new Date().toISOString().slice(0,19).replace(/[T:]/g,'') + '.png';
+    a.click();
+}
+
+function exportAllCharts() {
+    const names = [
+        ['cpuChart','cpu'], ['memChart','memory'], ['diskChart','disk_io'],
+        ['rtChart','response_time'], ['rowChart','row_count'], ['txChart','transactions']
+    ];
+    names.forEach(function(pair) { downloadChart(pair[0], pair[1]); });
+}
+
+function exportExcel() { window.location.href = '/monitor/export/excel'; }
+function exportCSV() { window.location.href = '/monitor/export/csv'; }
 </script>
 </body>
 </html>

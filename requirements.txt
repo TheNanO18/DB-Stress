@@ -6,3 +6,4 @@ JPype1==1.6.0       # JayDeBeApi의 JVM 브릿지 의존성
 psutil==6.1.1       # OS 레벨 모니터링 (CPU, 메모리, 디스크 I/O)
 paramiko==3.5.0     # SSH를 통한 원격 서버 OS 모니터링
 python-dotenv==1.2.2 # .env 파일에서 환경변수 로드
+openpyxl==3.1.5     # 모니터링 데이터 Excel 내보내기
