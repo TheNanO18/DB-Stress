@@ -10,7 +10,7 @@ import time
 
 import gevent
 from gevent import get_hub
-from locust import User, between, task, events
+from locust import User, task, events
 
 from core.config import get_config
 from core.db_client import CubridClient
@@ -77,8 +77,7 @@ class ReadIntensiveUser(CubridMixin, User):
 class LockContentionUser(CubridMixin, User):
     """동일 행(ID 1~3)에 대한 동시 UPDATE로 Lock 경합을 유발합니다."""
 
-    # Lock 경합을 확실히 유발하기 위해 대기 시간을 최소화
-    wait_time = between(0.01, 0.05)
+    wait_time = default_wait_time
 
     def on_start(self):
         self._setup()

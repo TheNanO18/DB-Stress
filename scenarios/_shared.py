@@ -6,7 +6,6 @@
 
 import threading
 
-from locust import between
 
 from core.config import get_config
 from core.db_client import CubridClient
@@ -90,6 +89,10 @@ class CubridMixin:
 
 
 # ---------------------------------------------------------------------------
-# 공통 wait_time
+# 공통 wait_time — 매 호출 시 config 최신 값을 반영
 # ---------------------------------------------------------------------------
-default_wait_time = between(_cfg.wait_min, _cfg.wait_max)
+def default_wait_time(self):
+    """config.yaml 또는 Web UI에서 설정한 wait_min/wait_max를 반영합니다."""
+    import random
+    cfg = get_config()
+    return random.uniform(cfg.wait_min, cfg.wait_max)

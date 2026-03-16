@@ -74,6 +74,15 @@ def on_init_parser(parser, **kwargs):
         env_var="SSH_KEY_FILE",
         help="SSH 키 파일 경로 (비워두면 config.yaml 값 사용)",
     )
+    # 태스크 대기 시간 파라미터
+    parser.add_argument(
+        "--wait-min", type=float, default=0,
+        help="태스크 간 최소 대기 시간(초) (0이면 config.yaml 값 사용)",
+    )
+    parser.add_argument(
+        "--wait-max", type=float, default=0,
+        help="태스크 간 최대 대기 시간(초) (0이면 config.yaml 값 사용)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +151,18 @@ def on_test_start(environment, **kwargs):
     if getattr(opts, "ssh_key_file", "") and opts.ssh_key_file:
         _cfg._data.setdefault("ssh", {})["key_file"] = opts.ssh_key_file
         ssh_overrides.append(f"key_file={opts.ssh_key_file}")
+
+    # 태스크 대기 시간 오버라이드
+    wait_overrides = []
+    if getattr(opts, "wait_min", 0) and opts.wait_min > 0:
+        _cfg._data["load_test"]["wait_min"] = opts.wait_min
+        wait_overrides.append(f"wait_min={opts.wait_min}s")
+    if getattr(opts, "wait_max", 0) and opts.wait_max > 0:
+        _cfg._data["load_test"]["wait_max"] = opts.wait_max
+        wait_overrides.append(f"wait_max={opts.wait_max}s")
+    if wait_overrides:
+        print(f"[Init] 태스크 대기 시간 오버라이드: {', '.join(wait_overrides)}")
+    print(f"[Init] 태스크 대기 시간: {_cfg.wait_min}s ~ {_cfg.wait_max}s")
 
     if ssh_overrides:
         print(f"[Init] SSH 접속 정보 오버라이드: {', '.join(ssh_overrides)}")
